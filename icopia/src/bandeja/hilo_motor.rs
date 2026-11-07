@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Orden {
@@ -44,14 +44,14 @@ fn abrir_registro(destino: &Path) -> anyhow::Result<Registro> {
 }
 
 fn emitir_resumen(cfg: &Config, fase: Fase, emitir: &(dyn Fn(EventoUi) + Sync)) {
-    let resumen = cfg
+    let progreso = cfg
         .destino
         .as_deref()
         .filter(|d| d.is_dir())
         .and_then(|d| abrir_registro(d).ok())
-        .and_then(|r| r.resumen().ok())
+        .and_then(|r| r.progreso().ok())
         .unwrap_or_default();
-    emitir(EventoUi::Estado(EstadoUi { fase, verificadas: resumen.verificadas, total: resumen.partes }));
+    emitir(EventoUi::Estado(EstadoUi::con_progreso(fase, &progreso)));
 }
 
 fn bucle(
@@ -181,21 +181,38 @@ fn una_ronda(
             return Some(Duration::from_secs(900));
         }
     };
-    let base = registro.lock().unwrap().resumen().unwrap_or_default();
+    // Como mucho 4 avisos por segundo a la interfaz y una consulta al registro por segundo.
+    let inicio = Instant::now() - Duration::from_secs(10);
+    let ritmo = Mutex::new((inicio, inicio, registro.lock().unwrap().progreso().unwrap_or_default()));
     let avance = |a: Avance| {
-        let fase = match a {
-            Avance::Listando { vistos } => Fase::Listando { vistos },
-            Avance::Copiando { hechas, total, .. } => Fase::Copiando { hechas, total },
+        let (fase, actual, ultimo) = match a {
+            Avance::Listando { vistos } => (Fase::Listando { vistos }, None, false),
+            Avance::Copiando { hechas, total, actual } => (Fase::Copiando { hechas, total }, Some(actual), hechas == total),
         };
-        emitir(EventoUi::Estado(EstadoUi { fase, verificadas: base.verificadas, total: base.partes }));
+        let mut r = ritmo.lock().unwrap();
+        let ahora = Instant::now();
+        if !ultimo && ahora.duration_since(r.0) < Duration::from_millis(250) {
+            return;
+        }
+        r.0 = ahora;
+        if ahora.duration_since(r.1) >= Duration::from_secs(1) {
+            r.1 = ahora;
+            if let Ok(p) = registro.lock().unwrap().progreso() {
+                r.2 = p;
+            }
+        }
+        let mut e = EstadoUi::con_progreso(fase, &r.2);
+        e.detalle.actual = actual;
+        drop(r);
+        emitir(EventoUi::Estado(e));
     };
     let op = OpcionesRonda { concurrencia: cfg.concurrencia, mes: None };
     let r = motor::ejecutar_ronda(&destino, &registro, fuente.as_mut(), http, &op, cancelar, &avance);
     drop(fuente);
     let reg = registro.lock().unwrap();
-    let resumen = reg.resumen().unwrap_or_default();
+    let progreso = reg.progreso().unwrap_or_default();
     let prox = reg.proximo_reintento(None).ok().flatten();
-    let estado = |fase: Fase| EventoUi::Estado(EstadoUi { fase, verificadas: resumen.verificadas, total: resumen.partes });
+    let estado = |fase: Fase| EventoUi::Estado(EstadoUi::con_progreso(fase, &progreso));
     match r {
         Err(e) => {
             bitacora::escribir(&dir_datos, &format!("ERROR en la ronda: {e:#}"));

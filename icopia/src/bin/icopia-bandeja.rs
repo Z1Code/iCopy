@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 use anyhow::Context;
-use icopia::bandeja::estado::EventoUi;
+use icopia::bandeja::estado::{EstadoUi, EventoUi, Fase};
+use icopia::bandeja::panel_ventana::{Accion, Panel};
 use icopia::bandeja::hilo_motor::{self, Orden};
 use icopia::bandeja::{autoarranque, avisos, icono};
 use icopia::config::{self, Config};
@@ -9,15 +10,23 @@ use icopia::puente::Puente;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
-use tao::event::{Event, StartCause};
+use tao::event::{Event, StartCause, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
+use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
+
+/// Eventos del bucle principal.
+enum Ev {
+    Ui(EventoUi),
+    Bandeja(TrayIconEvent),
+}
 
 fn instancia_unica() -> bool {
     use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
     use windows_sys::Win32::System::Threading::CreateMutexW;
-    let nombre: Vec<u16> = "Local\\icopia-bandeja\0".encode_utf16().collect();
+    // Con ICOPIA_DIR (pruebas, otra configuración) se permite una instancia por carpeta.
+    let sufijo = std::env::var("ICOPIA_DIR").map(|d| format!("-{:x}", d.bytes().fold(0u64, |h, b| h.wrapping_mul(131).wrapping_add(b as u64)))).unwrap_or_default();
+    let nombre: Vec<u16> = format!("Local\\icopia-bandeja{sufijo}\0").encode_utf16().collect();
     unsafe {
         let h = CreateMutexW(std::ptr::null(), 0, nombre.as_ptr());
         !h.is_null() && GetLastError() != ERROR_ALREADY_EXISTS
@@ -77,8 +86,12 @@ fn main() {
         }
     }
 
-    let event_loop = EventLoopBuilder::<EventoUi>::with_user_event().build();
+    let event_loop = EventLoopBuilder::<Ev>::with_user_event().build();
     let proxy = Mutex::new(event_loop.create_proxy());
+    let proxy_bandeja = Mutex::new(event_loop.create_proxy());
+    TrayIconEvent::set_event_handler(Some(move |e| {
+        let _ = proxy_bandeja.lock().unwrap().send_event(Ev::Bandeja(e));
+    }));
     let (tx, rx) = mpsc::channel::<Orden>();
     let cancelar = Arc::new(AtomicBool::new(false));
     hilo_motor::lanzar(
@@ -90,7 +103,7 @@ fn main() {
             Ok(Box::new(Puente::iniciar(id, &config::dir_sesion(), &config::log_puente())?) as Box<dyn FuenteIcloud>)
         }),
         Box::new(move |e| {
-            let _ = proxy.lock().unwrap().send_event(e);
+            let _ = proxy.lock().unwrap().send_event(Ev::Ui(e));
         }),
     );
     if cfg.apple_id.is_none() {
@@ -127,32 +140,99 @@ fn main() {
 
     let mut menu_pendiente = Some(menu);
     let mut tray: Option<TrayIcon> = None;
+    let mut panel: Option<Panel> = None;
+    let mut estado = EstadoUi::sin_datos(Fase::Inactiva);
     let mut pausado = false;
+    let mut ultimo_refresco = Instant::now();
 
-    event_loop.run(move |event, _, control_flow| {
-        *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(200));
+    let (tx_pausa, cancelar_pausa) = (tx.clone(), cancelar.clone());
+    let alternar_pausa = move |pausado: &mut bool, i_pausa: &MenuItem| {
+        if *pausado {
+            *pausado = false;
+            i_pausa.set_text("Pausar");
+            let _ = tx_pausa.send(Orden::Reanudar);
+        } else {
+            *pausado = true;
+            i_pausa.set_text("Reanudar");
+            let _ = tx_pausa.send(Orden::Pausar);
+            cancelar_pausa.store(true, Ordering::SeqCst);
+        }
+    };
+    let abrir_carpeta = || {
+        if let Some(d) = Config::cargar().ok().and_then(|c| c.destino) {
+            let _ = std::process::Command::new("explorer").arg(d).spawn();
+        }
+    };
+
+    event_loop.run(move |event, destino_ev, control_flow| {
+        let mut espera = Duration::from_millis(200);
         match event {
             Event::NewEvents(StartCause::Init) => {
                 tray = Some(
                     TrayIconBuilder::new()
                         .with_menu(Box::new(menu_pendiente.take().expect("menú")))
+                        .with_menu_on_left_click(false)
                         .with_tooltip("icopia")
                         .with_icon(icono_de(icopia::bandeja::estado::Color::Gris))
                         .build()
                         .expect("icono de bandeja"),
                 );
+                panel = Some(Panel::nuevo(destino_ev));
             }
-            Event::UserEvent(EventoUi::Estado(e)) => {
+            Event::UserEvent(Ev::Ui(EventoUi::Estado(e))) => {
                 let t = e.texto();
                 i_estado.set_text(&t);
                 if let Some(tr) = &tray {
                     let _ = tr.set_tooltip(Some(format!("icopia — {t}")));
-                    let _ = tr.set_icon(Some(icono_de(e.color())));
+                    if e.color() != estado.color() || estado.fase == Fase::Inactiva && estado.total == 0 {
+                        let _ = tr.set_icon(Some(icono_de(e.color())));
+                    }
+                }
+                estado = e;
+            }
+            Event::UserEvent(Ev::Ui(EventoUi::Aviso { titulo, texto })) => avisos::mostrar(&titulo, &texto),
+            Event::UserEvent(Ev::Bandeja(TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, rect, .. })) => {
+                if let Some(p) = panel.as_mut() {
+                    let centro = (rect.position.x as i32 + rect.size.width as i32 / 2, rect.position.y as i32 + rect.size.height as i32 / 2);
+                    p.alternar(centro, &estado);
                 }
             }
-            Event::UserEvent(EventoUi::Aviso { titulo, texto }) => avisos::mostrar(&titulo, &texto),
+            Event::WindowEvent { window_id, event, .. } if panel.as_ref().is_some_and(|p| p.id() == window_id) => {
+                let p = panel.as_mut().expect("panel");
+                match p.evento(&event, &estado) {
+                    Some(Accion::Pausa) => {
+                        alternar_pausa(&mut pausado, &i_pausa);
+                        p.refrescar(&estado);
+                    }
+                    Some(Accion::AbrirCarpeta) => {
+                        p.ocultar();
+                        abrir_carpeta();
+                    }
+                    None => {}
+                }
+                if matches!(event, WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. }) {
+                    p.refrescar(&estado);
+                }
+            }
+            Event::RedrawRequested(id) if panel.as_ref().is_some_and(|p| p.id() == id) => {
+                if let Some(p) = panel.as_mut() {
+                    p.refrescar(&estado);
+                }
+            }
             _ => {}
         }
+        if let Some(p) = panel.as_mut() {
+            p.muestrear();
+            if p.visible() {
+                let cada = p.intervalo(&estado);
+                if ultimo_refresco.elapsed() >= cada {
+                    ultimo_refresco = Instant::now();
+                    p.refrescar(&estado);
+                }
+                espera = espera.min(cada);
+            }
+        }
+        *control_flow = ControlFlow::WaitUntil(Instant::now() + espera);
         while let Ok(ev) = MenuEvent::receiver().try_recv() {
             let id = ev.id;
             if id == *i_copiar.id() {
@@ -160,16 +240,7 @@ fn main() {
                 i_pausa.set_text("Pausar");
                 let _ = tx.send(Orden::CopiarAhora);
             } else if id == *i_pausa.id() {
-                if pausado {
-                    pausado = false;
-                    i_pausa.set_text("Pausar");
-                    let _ = tx.send(Orden::Reanudar);
-                } else {
-                    pausado = true;
-                    i_pausa.set_text("Reanudar");
-                    let _ = tx.send(Orden::Pausar);
-                    cancelar.store(true, Ordering::SeqCst);
-                }
+                alternar_pausa(&mut pausado, &i_pausa);
             } else if id == *i_verificar.id() {
                 let _ = tx.send(Orden::Verificar);
             } else if id == *i_liberar.id() {
@@ -177,9 +248,7 @@ fn main() {
             } else if id == *i_login.id() {
                 lanzar_login(&tx, &cancelar, pausado);
             } else if id == *i_abrir.id() {
-                if let Some(d) = Config::cargar().ok().and_then(|c| c.destino) {
-                    let _ = std::process::Command::new("explorer").arg(d).spawn();
-                }
+                abrir_carpeta();
             } else if id == *i_destino.id() {
                 if let Some(p) = rfd::FileDialog::new().set_title("icopia: nueva carpeta destino").pick_folder() {
                     let mut c = Config::cargar().unwrap_or_default();

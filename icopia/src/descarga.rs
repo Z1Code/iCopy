@@ -4,7 +4,7 @@ use reqwest::StatusCode;
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -26,6 +26,9 @@ impl std::fmt::Display for ErrorDescarga {
         }
     }
 }
+
+/// Bytes recibidos por este proceso desde que arrancó (la bandeja calcula la velocidad con él).
+pub static BYTES_RECIBIDOS: AtomicU64 = AtomicU64::new(0);
 
 fn disco(e: std::io::Error) -> ErrorDescarga {
     ErrorDescarga::Disco(e.to_string())
@@ -172,6 +175,7 @@ pub fn descargar(cliente: &Client, url: &str, part: &Path, tamano: u64, identida
         }
         archivo.write_all(&buf[..n]).map_err(disco)?;
         escrito += n as u64;
+        BYTES_RECIBIDOS.fetch_add(n as u64, Ordering::Relaxed);
         sin_sincronizar += n as u64;
         if sin_sincronizar >= SINCRONIZAR_CADA {
             sincronizar(&archivo, part, identidad, escrito)?;

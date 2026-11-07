@@ -66,6 +66,18 @@ pub struct Resumen {
     pub borrados_icloud: u64,
 }
 
+/// Lo que muestra la bandeja: una consulta ligera para poder repetirla cada segundo.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Progreso {
+    pub partes: u64,
+    pub verificadas: u64,
+    pub con_error: u64,
+    pub bytes_total: u64,
+    pub bytes_verificados: u64,
+    /// Fin del último listado completo de iCloud (unix).
+    pub ultimo_listado: Option<i64>,
+}
+
 const ESQUEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS meta(clave TEXT PRIMARY KEY, valor TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS assets(
@@ -417,6 +429,27 @@ impl Registro {
         })
     }
 
+    pub fn progreso(&self) -> Result<Progreso> {
+        let (partes, verificadas, con_error, bytes_total, bytes_verificados): (i64, i64, i64, i64, i64) = self.con.query_row(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(estado = 'verificado'), 0),
+                    COALESCE(SUM(estado = 'error'), 0),
+                    COALESCE(SUM(tamano), 0),
+                    COALESCE(SUM(CASE WHEN estado = 'verificado' THEN tamano ELSE 0 END), 0)
+             FROM partes",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )?;
+        Ok(Progreso {
+            partes: partes as u64,
+            verificadas: verificadas as u64,
+            con_error: con_error as u64,
+            bytes_total: bytes_total as u64,
+            bytes_verificados: bytes_verificados as u64,
+            ultimo_listado: self.marca_lista()?,
+        })
+    }
+
     /// Últimos errores, uno por línea: "IMG_0001 (live): motivo".
     pub fn errores(&self, limite: usize) -> Result<Vec<String>> {
         let mut st = self.con.prepare(
@@ -662,6 +695,9 @@ mod tests {
         let s = r.resumen().unwrap();
         assert_eq!((s.assets, s.partes, s.verificadas, s.pendientes), (1, 2, 1, 1));
         assert_eq!((s.bytes_total, s.bytes_verificados), (15, 10));
+        let p = r.progreso().unwrap();
+        assert_eq!((p.partes, p.verificadas, p.con_error, p.bytes_total, p.bytes_verificados), (2, 1, 0, 15, 10));
+        assert_eq!(p.ultimo_listado, r.marca_lista().unwrap());
         assert_eq!(r.errores(10).unwrap(), vec!["IMG_A1 (live): HTTP 503".to_string()]);
     }
 }

@@ -158,6 +158,8 @@ pub fn ejecutar_ronda(
                     sin_espacio.store(true, Ordering::Relaxed);
                     break;
                 }
+                let actual = format!("{} ({})", t.nombre_base, t.tipo.como_str());
+                avance(Avance::Copiando { hechas: hechas.load(Ordering::Relaxed), total, actual: actual.clone() });
                 match procesar_parte(destino, registro, http, &t, cancelar) {
                     Ok(sha) => {
                         if let Err(e) = registro.lock().unwrap().marcar_verificada(&t.asset_id, t.tipo, &sha) {
@@ -177,7 +179,7 @@ pub fn ejecutar_ronda(
                     }
                 }
                 let n = hechas.fetch_add(1, Ordering::Relaxed) + 1;
-                avance(Avance::Copiando { hechas: n, total, actual: format!("{} ({})", t.nombre_base, t.tipo.como_str()) });
+                avance(Avance::Copiando { hechas: n, total, actual });
             });
         }
     });
