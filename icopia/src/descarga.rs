@@ -45,16 +45,45 @@ pub fn ruta_part(final_: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
+/// `<archivo>.part.meta`: identidad del contenido que se está bajando ("tamaño:checksum").
+pub fn ruta_meta(part: &Path) -> PathBuf {
+    let mut s = part.as_os_str().to_owned();
+    s.push(".meta");
+    PathBuf::from(s)
+}
+
+/// Borra el `.part` y su `.meta` (lo que no exista se ignora).
+pub fn borrar_part(part: &Path) {
+    let _ = std::fs::remove_file(part);
+    let _ = std::fs::remove_file(ruta_meta(part));
+}
+
+fn leer_identidad(part: &Path) -> Option<String> {
+    let texto = std::fs::read_to_string(ruta_meta(part)).ok()?;
+    texto.lines().next().map(str::to_string)
+}
+
+fn escribir_meta(part: &Path, identidad: &str) -> Result<(), ErrorDescarga> {
+    let mut f = std::fs::File::create(ruta_meta(part)).map_err(disco)?;
+    writeln!(f, "{identidad}").map_err(disco)?;
+    f.sync_all().map_err(disco)
+}
+
 fn inicio_content_range(v: &str) -> Option<u64> {
     v.strip_prefix("bytes ")?.split('-').next()?.parse().ok()
 }
 
-/// Deja en `part` exactamente `tamano` bytes descargados de `url`, reanudando si ya había algo.
-pub fn descargar(cliente: &Client, url: &str, part: &Path, tamano: u64, cancelar: &AtomicBool) -> Result<(), ErrorDescarga> {
+/// Deja en `part` exactamente `tamano` bytes descargados de `url`, reanudando si ya había algo
+/// del mismo contenido (`identidad`, anotada en `<part>.meta`); si no, empieza de cero.
+pub fn descargar(cliente: &Client, url: &str, part: &Path, tamano: u64, identidad: &str, cancelar: &AtomicBool) -> Result<(), ErrorDescarga> {
     let mut tengo = std::fs::metadata(part).map(|m| m.len()).unwrap_or(0);
-    if tengo > tamano {
+    let mismo_contenido = leer_identidad(part).as_deref() == Some(identidad);
+    if part.exists() && (tengo > tamano || !mismo_contenido) {
         std::fs::remove_file(part).map_err(disco)?;
         tengo = 0;
+    }
+    if !part.exists() {
+        escribir_meta(part, identidad)?;
     }
     if tengo == tamano && tamano > 0 {
         return Ok(());
@@ -73,14 +102,14 @@ pub fn descargar(cliente: &Client, url: &str, part: &Path, tamano: u64, cancelar
                 .and_then(|v| v.to_str().ok())
                 .and_then(inicio_content_range);
             if inicio != Some(tengo) {
-                let _ = std::fs::remove_file(part);
+                borrar_part(part);
                 return Err(ErrorDescarga::Transitorio("el servidor devolvió un rango inesperado; se reinicia".into()));
             }
             true
         }
         StatusCode::OK => false,
         StatusCode::RANGE_NOT_SATISFIABLE => {
-            let _ = std::fs::remove_file(part);
+            borrar_part(part);
             return Err(ErrorDescarga::Transitorio("rango no satisfacible; se reinicia".into()));
         }
         s if s == StatusCode::UNAUTHORIZED || s == StatusCode::FORBIDDEN || s == StatusCode::NOT_FOUND || s == StatusCode::GONE => {

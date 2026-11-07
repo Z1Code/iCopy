@@ -206,7 +206,8 @@ fn procesar_parte(destino: &Path, registro: &Mutex<Registro>, http: &Client, t: 
             let rel = {
                 let consulta = &*reg;
                 layout::elegir_ruta(&t.nombre_base, &t.asset_id, &t.fecha, t.tipo, &t.extension, &mut |clave| {
-                    consulta.ruta_ocupada(clave).unwrap_or(true) || destino.join(clave).exists()
+                    let en_disco = destino.join(clave);
+                    consulta.ruta_ocupada(clave).unwrap_or(true) || en_disco.exists() || descarga::ruta_part(&en_disco).exists()
                 })
                 .map_err(|e| ErrorParte::Ruta(e.to_string()))?
             };
@@ -230,7 +231,8 @@ fn procesar_parte(destino: &Path, registro: &Mutex<Registro>, http: &Client, t: 
         }
     }
     let part = descarga::ruta_part(&final_);
-    descarga::descargar(http, &t.url, &part, t.tamano, cancelar).map_err(|e| match e {
+    let identidad = format!("{}:{}", t.tamano, t.checksum);
+    descarga::descargar(http, &t.url, &part, t.tamano, &identidad, cancelar).map_err(|e| match e {
         ErrorDescarga::Cancelada => ErrorParte::Cancelada,
         otro => ErrorParte::Descarga(otro),
     })?;
@@ -242,10 +244,11 @@ fn procesar_parte(destino: &Path, registro: &Mutex<Registro>, http: &Client, t: 
                 .anotar_sha_pendiente(&t.asset_id, t.tipo, &sha)
                 .map_err(|e| ErrorParte::Registro(e.to_string()))?;
             std::fs::rename(&part, &final_).map_err(|e| ErrorParte::Disco(e.to_string()))?;
+            let _ = std::fs::remove_file(descarga::ruta_meta(&part));
             Ok(sha)
         }
         Err(f) => {
-            let _ = std::fs::remove_file(&part);
+            descarga::borrar_part(&part);
             Err(ErrorParte::Verificacion(f))
         }
     }

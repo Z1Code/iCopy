@@ -18,6 +18,8 @@ pub struct TrabajoParte {
     pub fecha: String,
     pub extension: String,
     pub tamano: u64,
+    /// Checksum que da Apple; junto con el tamaño identifica el contenido de un `.part`.
+    pub checksum: String,
     pub url: String,
     pub ruta: Option<String>,
     /// SHA-256 del `.part` verificado justo antes de renombrarlo; solo con él se adopta un archivo final ya existente.
@@ -202,7 +204,7 @@ impl Registro {
     /// Partes por copiar de assets presentes en el último listado, de la más antigua a la más nueva.
     pub fn partes_pendientes(&self, ahora: i64, mes: Option<&str>) -> Result<Vec<TrabajoParte>> {
         let sql = format!(
-            "SELECT p.asset_id, p.tipo, a.nombre_base, a.fecha, p.extension, p.tamano, p.url, p.ruta, p.sha_pendiente
+            "SELECT p.asset_id, p.tipo, a.nombre_base, a.fecha, p.extension, p.tamano, p.url, p.ruta, p.sha_pendiente, p.checksum_apple
              FROM partes p JOIN assets a ON a.id = p.asset_id
              WHERE p.estado <> 'verificado' AND p.proximo_intento <= ?1 AND a.borrado_icloud IS NULL
                AND {EN_ULTIMA_LISTA} AND (?2 IS NULL OR a.mes = ?2)
@@ -220,6 +222,7 @@ impl Registro {
                 url: r.get(6)?,
                 ruta: r.get(7)?,
                 sha_pendiente: r.get(8)?,
+                checksum: r.get(9)?,
             })
         })?;
         Ok(filas.collect::<rusqlite::Result<Vec<_>>>()?)

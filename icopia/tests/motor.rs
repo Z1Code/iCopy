@@ -167,3 +167,43 @@ fn filtro_por_mes() {
     assert_eq!(ronda_con(d.path(), &nuevo_registro(), &mut f, 2, Some("2026-08")).verificadas, 1);
     assert_eq!(s.peticiones_a("/b").len(), 0);
 }
+
+#[test]
+fn un_part_ajeno_ocupa_el_nombre() {
+    let j = jpeg(100);
+    let s = servidor(vec![("/j", Comportamiento::Servir(j.clone()))]);
+    let mut f = FuenteFalsa { assets: vec![asset("A1xxxx", "IMG_0001", AGO, "PrimarySync", vec![parte(TipoParte::Original, &j, s.url("/j"), "JPG")])], ..Default::default() };
+    let d = tempfile::tempdir().unwrap();
+    let carpeta = d.path().join(r"2026\2026-08");
+    std::fs::create_dir_all(&carpeta).unwrap();
+    std::fs::write(carpeta.join("IMG_0001.JPG.part"), b"de otro").unwrap();
+    assert_eq!(ronda(d.path(), &nuevo_registro(), &mut f).verificadas, 1);
+    assert_eq!(std::fs::read(carpeta.join("IMG_0001 (a1xxxx).JPG")).unwrap(), j);
+    assert_eq!(std::fs::read(carpeta.join("IMG_0001.JPG.part")).unwrap(), b"de otro");
+}
+
+#[test]
+fn edicion_nueva_no_reanuda_el_part_viejo() {
+    let viejo = heic(3_000_000);
+    let mut nuevo = viejo.clone();
+    let n = nuevo.len();
+    nuevo[n - 1] ^= 0xFF; // mismo tamaño, otro contenido
+    let s = servidor(vec![
+        ("/v", Comportamiento::CortarPrimeraVez { datos: viejo.clone(), tras: 1_000_000 }),
+        ("/n", Comportamiento::Servir(nuevo.clone())),
+    ]);
+    let mut p = parte(TipoParte::Original, &viejo, s.url("/v"), "HEIC");
+    let mut f = FuenteFalsa { assets: vec![asset("A1", "IMG_0001", AGO, "PrimarySync", vec![p.clone()])], ..Default::default() };
+    let d = tempfile::tempdir().unwrap();
+    let reg = nuevo_registro();
+    assert_eq!(ronda(d.path(), &reg, &mut f).fallidas, 1);
+    p.url = s.url("/n");
+    p.checksum = "otro".into();
+    f.assets[0].partes = vec![p];
+    reg.lock().unwrap().reintentar_ya().unwrap();
+    assert_eq!(ronda(d.path(), &reg, &mut f).verificadas, 1);
+    assert_eq!(s.peticiones_a("/n")[0].rango, None);
+    let final_ = d.path().join(r"2026\2026-08\IMG_0001.HEIC");
+    assert_eq!(std::fs::read(&final_).unwrap(), nuevo);
+    assert!(!descarga::ruta_meta(&descarga::ruta_part(&final_)).exists());
+}
