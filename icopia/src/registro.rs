@@ -99,17 +99,17 @@ CREATE TABLE IF NOT EXISTS partes(
 CREATE INDEX IF NOT EXISTS partes_estado ON partes(estado, proximo_intento);
 "#;
 
-// Un cambio de tamaño o de extensión significa que el archivo en iCloud cambió (p. ej. nueva edición).
+// Un cambio de tamaño, de extensión o de checksum significa que el archivo en iCloud cambió (p. ej. nueva edición).
 const UPSERT_PARTE: &str = r#"
 INSERT INTO partes(asset_id, tipo, extension, tamano, checksum_apple, url) VALUES(?1, ?2, ?3, ?4, ?5, ?6)
 ON CONFLICT(asset_id, tipo) DO UPDATE SET
   url = excluded.url,
   checksum_apple = excluded.checksum_apple,
-  estado = CASE WHEN partes.tamano <> excluded.tamano OR partes.extension <> excluded.extension THEN 'pendiente' ELSE partes.estado END,
-  sha256 = CASE WHEN partes.tamano <> excluded.tamano OR partes.extension <> excluded.extension THEN NULL ELSE partes.sha256 END,
-  intentos = CASE WHEN partes.tamano <> excluded.tamano OR partes.extension <> excluded.extension THEN 0 ELSE partes.intentos END,
-  proximo_intento = CASE WHEN partes.tamano <> excluded.tamano OR partes.extension <> excluded.extension THEN 0 ELSE partes.proximo_intento END,
-  sha_pendiente = CASE WHEN partes.tamano <> excluded.tamano OR partes.extension <> excluded.extension THEN NULL ELSE partes.sha_pendiente END,
+  estado = CASE WHEN partes.tamano <> excluded.tamano OR partes.extension <> excluded.extension OR partes.checksum_apple <> excluded.checksum_apple THEN 'pendiente' ELSE partes.estado END,
+  sha256 = CASE WHEN partes.tamano <> excluded.tamano OR partes.extension <> excluded.extension OR partes.checksum_apple <> excluded.checksum_apple THEN NULL ELSE partes.sha256 END,
+  intentos = CASE WHEN partes.tamano <> excluded.tamano OR partes.extension <> excluded.extension OR partes.checksum_apple <> excluded.checksum_apple THEN 0 ELSE partes.intentos END,
+  proximo_intento = CASE WHEN partes.tamano <> excluded.tamano OR partes.extension <> excluded.extension OR partes.checksum_apple <> excluded.checksum_apple THEN 0 ELSE partes.proximo_intento END,
+  sha_pendiente = CASE WHEN partes.tamano <> excluded.tamano OR partes.extension <> excluded.extension OR partes.checksum_apple <> excluded.checksum_apple THEN NULL ELSE partes.sha_pendiente END,
   ruta = CASE WHEN partes.extension <> excluded.extension THEN NULL ELSE partes.ruta END,
   ruta_clave = CASE WHEN partes.extension <> excluded.extension THEN NULL ELSE partes.ruta_clave END,
   tamano = excluded.tamano,
@@ -492,6 +492,20 @@ mod tests {
         let p = r.partes_pendientes(1000, None).unwrap();
         assert_eq!(p.len(), 1);
         assert_eq!(p[0].tamano, 11);
+    }
+
+    #[test]
+    fn cambio_de_checksum_con_mismo_tamano_vuelve_a_pendiente() {
+        let mut r = Registro::en_memoria().unwrap();
+        listar(&mut r, &[asset("A1", "PrimarySync", AGO, &[(Editada, 10)])], 100);
+        dar_por_copiado(&mut r, "A1", Editada);
+        let mut otra = asset("A1", "PrimarySync", AGO, &[(Editada, 10)]);
+        otra.partes[0].checksum = "otro".into();
+        listar(&mut r, &[otra], 200);
+        let p = r.partes_pendientes(1000, None).unwrap();
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0].checksum, "otro");
+        assert!(r.partes_verificadas().unwrap().is_empty());
     }
 
     #[test]
