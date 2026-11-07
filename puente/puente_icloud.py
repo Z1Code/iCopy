@@ -67,6 +67,14 @@ def fecha_de(asset: Any) -> str:
     return dt.astimezone(get_localzone()).isoformat()
 
 
+def fecha_agregada_de(asset: Any, respaldo: str) -> str:
+    """Cuándo se añadió a la fototeca (RFC 3339 local); si no se sabe, la fecha de captura."""
+    try:
+        return asset.added_date.astimezone(get_localzone()).isoformat()
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return respaldo
+
+
 def _parte(tipo: str, version: Any, extension: str) -> Dict[str, Any]:
     return {"tipo": tipo, "tamano": int(version.size), "url": version.url,
             "extension": extension, "checksum": version.checksum or ""}
@@ -131,8 +139,10 @@ def asset_a_json(asset: Any, biblioteca: str) -> Optional[Dict[str, Any]]:
                 copiados.add("resJPEGFull")
     # Si iCloud guarda algo que no copiamos (y no es una miniatura), borrar el asset lo perdería.
     liberable = not (_prefijos_res(asset) - copiados - DERIVADOS)
+    fecha = fecha_de(asset)
     return {"id": asset.id, "biblioteca": biblioteca,
-            "nombre_base": os.path.splitext(nombre)[0], "fecha": fecha_de(asset),
+            "nombre_base": os.path.splitext(nombre)[0], "fecha": fecha,
+            "fecha_agregada": fecha_agregada_de(asset, fecha),
             "liberable": liberable, "partes": partes}
 
 

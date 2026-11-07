@@ -354,3 +354,27 @@ def test_listar_incluye_ocultas_sin_duplicar(salida):
     assert [l["asset"]["id"] for l in ls if "asset" in l] == ["A1", "H1", "S1"]
     assert ls[-1] == {"ok": True, "total": 3, "omitidos": 0}
     assert p.cache["H1"][0] == "PrimarySync"
+
+
+def test_fecha_agregada():
+    a = AssetFalso(versiones={AssetVersionSize.ORIGINAL: V(1, "u", "public.heic")})
+    a.added_date = datetime(2026, 10, 1, 12, 0, 0, tzinfo=timezone.utc)
+    j = pi.asset_a_json(a, "PrimarySync")
+    f = datetime.fromisoformat(j["fecha_agregada"])
+    assert f.utcoffset() is not None
+    assert f == a.added_date
+
+
+def test_fecha_agregada_sin_dato_usa_la_de_captura():
+    class SinAgregada(AssetFalso):
+        @property
+        def added_date(self):
+            raise KeyError("addedDate")
+
+        @added_date.setter
+        def added_date(self, v):
+            pass
+
+    a = SinAgregada(versiones={AssetVersionSize.ORIGINAL: V(1, "u", "public.heic")})
+    j = pi.asset_a_json(a, "PrimarySync")
+    assert j["fecha_agregada"] == j["fecha"]

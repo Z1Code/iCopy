@@ -77,7 +77,8 @@ CREATE TABLE IF NOT EXISTS assets(
   mes TEXT NOT NULL,
   visto_en_lista INTEGER NOT NULL,
   borrado_icloud TEXT,
-  liberable INTEGER NOT NULL DEFAULT 1
+  liberable INTEGER NOT NULL DEFAULT 1,
+  agregado_unix INTEGER
 );
 CREATE TABLE IF NOT EXISTS partes(
   asset_id TEXT NOT NULL REFERENCES assets(id),
@@ -164,19 +165,22 @@ impl Registro {
         con.execute_batch(ESQUEMA)?;
         asegurar_columna(&con, "partes", "sha_pendiente", "TEXT")?;
         asegurar_columna(&con, "assets", "liberable", "INTEGER NOT NULL DEFAULT 1")?;
+        asegurar_columna(&con, "assets", "agregado_unix", "INTEGER")?;
         Ok(Registro { con })
     }
 
     pub fn upsert_asset(&mut self, a: &AssetIcloud, marca: i64) -> Result<()> {
         let f = layout::fecha(&a.fecha).with_context(|| format!("fecha inválida en {}", a.id))?;
+        let agregado = a.fecha_agregada.as_deref().and_then(|t| layout::fecha(t).ok()).map(|f| f.timestamp()).unwrap_or(f.timestamp());
         let tx = self.con.transaction()?;
         tx.execute(
-            "INSERT INTO assets(id, biblioteca, nombre_base, fecha, fecha_unix, mes, visto_en_lista, liberable)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "INSERT INTO assets(id, biblioteca, nombre_base, fecha, fecha_unix, mes, visto_en_lista, liberable, agregado_unix)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(id) DO UPDATE SET biblioteca = excluded.biblioteca, nombre_base = excluded.nombre_base,
                fecha = excluded.fecha, fecha_unix = excluded.fecha_unix, mes = excluded.mes,
-               visto_en_lista = excluded.visto_en_lista, borrado_icloud = NULL, liberable = excluded.liberable",
-            params![a.id, a.biblioteca, a.nombre_base, a.fecha, f.timestamp(), layout::mes_clave(&f), marca, a.liberable],
+               visto_en_lista = excluded.visto_en_lista, borrado_icloud = NULL, liberable = excluded.liberable,
+               agregado_unix = excluded.agregado_unix",
+            params![a.id, a.biblioteca, a.nombre_base, a.fecha, f.timestamp(), layout::mes_clave(&f), marca, a.liberable, agregado],
         )?;
         for p in &a.partes {
             tx.execute(UPSERT_PARTE, params![a.id, p.tipo.como_str(), p.extension, p.tamano as i64, p.checksum, p.url])?;
@@ -320,13 +324,13 @@ impl Registro {
         Ok(filas.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// Assets personales, del listado `marca`, anteriores a `limite_unix`, con todas sus partes verificadas.
+    /// Assets personales, del listado `marca`, capturados y agregados antes de `limite_unix`, con todas sus partes verificadas.
     /// Solo los marcados como liberables. Cuenta aparte los que no están verificados del todo
     /// y los que tienen datos que icopia no copia.
     pub fn candidatos_liberar(&self, marca: i64, limite_unix: i64) -> Result<CandidatosLiberar> {
         let mut st = self.con.prepare(
             "SELECT a.id, a.nombre_base, a.fecha FROM assets a
-             WHERE a.biblioteca = ?3 AND a.borrado_icloud IS NULL AND a.visto_en_lista = ?1 AND a.fecha_unix < ?2
+             WHERE a.biblioteca = ?3 AND a.borrado_icloud IS NULL AND a.visto_en_lista = ?1 AND MAX(a.fecha_unix, COALESCE(a.agregado_unix, a.fecha_unix)) < ?2
                AND a.liberable = 1
                AND EXISTS(SELECT 1 FROM partes p WHERE p.asset_id = a.id)
                AND NOT EXISTS(SELECT 1 FROM partes p WHERE p.asset_id = a.id
@@ -357,7 +361,7 @@ impl Registro {
         }
         let no_listos: i64 = self.con.query_row(
             "SELECT COUNT(*) FROM assets a
-             WHERE a.biblioteca = ?3 AND a.borrado_icloud IS NULL AND a.visto_en_lista = ?1 AND a.fecha_unix < ?2
+             WHERE a.biblioteca = ?3 AND a.borrado_icloud IS NULL AND a.visto_en_lista = ?1 AND MAX(a.fecha_unix, COALESCE(a.agregado_unix, a.fecha_unix)) < ?2
                AND a.liberable = 1
                AND (NOT EXISTS(SELECT 1 FROM partes p WHERE p.asset_id = a.id)
                     OR EXISTS(SELECT 1 FROM partes p WHERE p.asset_id = a.id AND p.estado <> 'verificado'))",
@@ -366,7 +370,7 @@ impl Registro {
         )?;
         let no_liberables: i64 = self.con.query_row(
             "SELECT COUNT(*) FROM assets a
-             WHERE a.biblioteca = ?3 AND a.borrado_icloud IS NULL AND a.visto_en_lista = ?1 AND a.fecha_unix < ?2
+             WHERE a.biblioteca = ?3 AND a.borrado_icloud IS NULL AND a.visto_en_lista = ?1 AND MAX(a.fecha_unix, COALESCE(a.agregado_unix, a.fecha_unix)) < ?2
                AND a.liberable = 0",
             params![marca, limite_unix, BIBLIOTECA_PERSONAL],
             |r| r.get(0),
@@ -441,6 +445,7 @@ mod tests {
             biblioteca: bib.into(),
             nombre_base: format!("IMG_{id}"),
             fecha: fecha.into(),
+            fecha_agregada: None,
             liberable: true,
             partes: partes
                 .iter()
@@ -597,6 +602,23 @@ mod tests {
     }
 
     #[test]
+    fn lo_agregado_hace_poco_se_conserva_aunque_la_foto_sea_vieja() {
+        let mut r = Registro::en_memoria().unwrap();
+        let mut a = asset("A1", "PrimarySync", VIEJO, &[(Original, 1)]);
+        a.fecha_agregada = Some("2026-10-01T10:00:00-04:00".into());
+        let b = asset("A2", "PrimarySync", VIEJO, &[(Original, 1)]);
+        let mut c = asset("A3", "PrimarySync", VIEJO, &[(Original, 1)]);
+        c.fecha_agregada = Some("2024-01-01T10:00:00-05:00".into()); // anterior a la captura: manda la captura
+        listar(&mut r, &[a, b, c], 100);
+        for id in ["A1", "A2", "A3"] {
+            dar_por_copiado(&mut r, id, Original);
+        }
+        let limite = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z").unwrap().timestamp();
+        let c = r.candidatos_liberar(100, limite).unwrap();
+        assert_eq!(c.candidatos.iter().map(|c| c.asset_id.as_str()).collect::<Vec<_>>(), vec!["A2", "A3"]);
+    }
+
+    #[test]
     fn orden_de_partes_pendientes() {
         let mut r = Registro::en_memoria().unwrap();
         listar(&mut r, &[asset("A1", "PrimarySync", AGO, &[(Editada, 1), (Alternativa, 1), (Live, 1), (Original, 1)])], 100);
@@ -609,13 +631,15 @@ mod tests {
         let con = Connection::open_in_memory().unwrap();
         let viejo = ESQUEMA.replace("  sha_pendiente TEXT,
 ", "").replace("borrado_icloud TEXT,
-  liberable INTEGER NOT NULL DEFAULT 1", "borrado_icloud TEXT");
+  liberable INTEGER NOT NULL DEFAULT 1,
+  agregado_unix INTEGER", "borrado_icloud TEXT");
         con.execute_batch(&viejo).unwrap();
         assert!(con.prepare("SELECT sha_pendiente FROM partes").is_err());
         assert!(con.prepare("SELECT liberable FROM assets").is_err());
+        assert!(con.prepare("SELECT agregado_unix FROM assets").is_err());
         let r = Registro::con_esquema(con).unwrap();
         assert!(r.con.prepare("SELECT sha_pendiente FROM partes").is_ok());
-        assert!(r.con.prepare("SELECT liberable FROM assets").is_ok());
+        assert!(r.con.prepare("SELECT liberable, agregado_unix FROM assets").is_ok());
     }
 
     #[test]

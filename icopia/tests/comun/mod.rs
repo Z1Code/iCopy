@@ -150,5 +150,5 @@ pub fn parte(tipo: TipoParte, datos: &[u8], url: String, ext: &str) -> ParteIclo
 }
 
 pub fn asset(id: &str, nombre: &str, fecha: &str, biblioteca: &str, partes: Vec<ParteIcloud>) -> AssetIcloud {
-    AssetIcloud { id: id.into(), biblioteca: biblioteca.into(), nombre_base: nombre.into(), fecha: fecha.into(), liberable: true, partes }
+    AssetIcloud { id: id.into(), biblioteca: biblioteca.into(), nombre_base: nombre.into(), fecha: fecha.into(), fecha_agregada: None, liberable: true, partes }
 }

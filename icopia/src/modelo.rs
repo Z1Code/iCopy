@@ -50,6 +50,10 @@ pub struct AssetIcloud {
     pub nombre_base: String,
     /// RFC 3339 en hora local con desfase, p. ej. "2026-08-10T19:37:18-04:00".
     pub fecha: String,
+    /// Cuándo se añadió a la fototeca (RFC 3339). La ventana de "mantener N días" usa la más
+    /// reciente entre esta y `fecha`.
+    #[serde(default)]
+    pub fecha_agregada: Option<String>,
     /// false si iCloud guarda datos de este asset que icopia no copia: nunca se borra de iCloud.
     /// El puente real siempre lo envía; el valor por omisión es solo por compatibilidad.
     #[serde(default = "verdadero")]
@@ -75,16 +79,19 @@ mod tests {
         assert_eq!(a.partes[0].tamano, 10);
         assert_eq!(a.partes[1].tipo, TipoParte::Live);
         assert!(a.liberable, "sin el campo se asume liberable (compatibilidad)");
+        assert_eq!(a.fecha_agregada, None);
     }
 
     #[test]
     fn deserializa_alternativa_y_no_liberable() {
         let j = r#"{"id":"A1","biblioteca":"PrimarySync","nombre_base":"IMG_0001","liberable":false,
+            "fecha_agregada":"2026-09-01T10:00:00-04:00",
             "fecha":"2026-08-10T19:37:18-04:00","partes":[
             {"tipo":"alternativa","tamano":10,"url":"http://x/1","extension":"DNG","checksum":"c"}]}"#;
         let a: AssetIcloud = serde_json::from_str(j).unwrap();
         assert_eq!(a.partes[0].tipo, TipoParte::Alternativa);
         assert!(!a.liberable);
+        assert_eq!(a.fecha_agregada.as_deref(), Some("2026-09-01T10:00:00-04:00"));
     }
 
     #[test]
