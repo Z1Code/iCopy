@@ -113,15 +113,21 @@ CREATE INDEX IF NOT EXISTS partes_estado ON partes(estado, proximo_intento);
 "#;
 
 // Un cambio de tamaño, de extensión o de checksum significa que el archivo en iCloud cambió (p. ej. nueva edición).
+// Un fallo por enlace caducado no es culpa del asset: al llegar un enlace nuevo se olvida (intentos, espera
+// y estado 'error'). Las versiones anteriores los contaban como fallos y penalizaban miles de partes.
 const UPSERT_PARTE: &str = r#"
 INSERT INTO partes(asset_id, tipo, extension, tamano, checksum_apple, url) VALUES(?1, ?2, ?3, ?4, ?5, ?6)
 ON CONFLICT(asset_id, tipo) DO UPDATE SET
   url = excluded.url,
   checksum_apple = excluded.checksum_apple,
-  estado = CASE WHEN partes.tamano <> excluded.tamano OR partes.extension <> excluded.extension OR partes.checksum_apple <> excluded.checksum_apple THEN 'pendiente' ELSE partes.estado END,
+  estado = CASE WHEN partes.tamano <> excluded.tamano OR partes.extension <> excluded.extension OR partes.checksum_apple <> excluded.checksum_apple THEN 'pendiente'
+    WHEN partes.estado = 'error' AND partes.ultimo_error LIKE 'enlace de descarga caducado%' THEN 'pendiente' ELSE partes.estado END,
   sha256 = CASE WHEN partes.tamano <> excluded.tamano OR partes.extension <> excluded.extension OR partes.checksum_apple <> excluded.checksum_apple THEN NULL ELSE partes.sha256 END,
-  intentos = CASE WHEN partes.tamano <> excluded.tamano OR partes.extension <> excluded.extension OR partes.checksum_apple <> excluded.checksum_apple THEN 0 ELSE partes.intentos END,
-  proximo_intento = CASE WHEN partes.tamano <> excluded.tamano OR partes.extension <> excluded.extension OR partes.checksum_apple <> excluded.checksum_apple THEN 0 ELSE partes.proximo_intento END,
+  intentos = CASE WHEN partes.tamano <> excluded.tamano OR partes.extension <> excluded.extension OR partes.checksum_apple <> excluded.checksum_apple THEN 0
+    WHEN partes.ultimo_error LIKE 'enlace de descarga caducado%' THEN 0 ELSE partes.intentos END,
+  proximo_intento = CASE WHEN partes.tamano <> excluded.tamano OR partes.extension <> excluded.extension OR partes.checksum_apple <> excluded.checksum_apple THEN 0
+    WHEN partes.ultimo_error LIKE 'enlace de descarga caducado%' THEN 0 ELSE partes.proximo_intento END,
+  ultimo_error = CASE WHEN partes.ultimo_error LIKE 'enlace de descarga caducado%' THEN NULL ELSE partes.ultimo_error END,
   sha_pendiente = CASE WHEN partes.tamano <> excluded.tamano OR partes.extension <> excluded.extension OR partes.checksum_apple <> excluded.checksum_apple THEN NULL ELSE partes.sha_pendiente END,
   ruta = CASE WHEN partes.extension <> excluded.extension THEN NULL ELSE partes.ruta END,
   ruta_clave = CASE WHEN partes.extension <> excluded.extension THEN NULL ELSE partes.ruta_clave END,
@@ -578,6 +584,35 @@ mod tests {
         assert_eq!(espera_reintento(10), ("error", 6 * 3600));
         r.reintentar_ya().unwrap();
         assert_eq!(r.partes_pendientes(1000, None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn relistar_perdona_los_fallos_por_enlace_caducado() {
+        // Base dañada por versiones anteriores: miles de partes penalizadas por enlaces caducados.
+        let mut r = Registro::en_memoria().unwrap();
+        listar(&mut r, &[
+            asset("A1", "PrimarySync", AGO, &[(Original, 10)]),
+            asset("A2", "PrimarySync", AGO, &[(Original, 10)]),
+            asset("A3", "PrimarySync", AGO, &[(Original, 10)]),
+        ], 100);
+        for _ in 0..10 {
+            r.registrar_fallo("A1", Original, "enlace de descarga caducado (HTTP 410)", 1000).unwrap();
+        }
+        r.registrar_fallo("A2", Original, "enlace de descarga caducado (HTTP 403)", 1000).unwrap();
+        r.registrar_fallo("A3", Original, "fallo de red: corte", 1000).unwrap();
+        assert_eq!(r.resumen().unwrap().con_error, 1);
+        listar(&mut r, &[
+            asset("A1", "PrimarySync", AGO, &[(Original, 10)]),
+            asset("A2", "PrimarySync", AGO, &[(Original, 10)]),
+            asset("A3", "PrimarySync", AGO, &[(Original, 10)]),
+        ], 200);
+        let ids: Vec<_> = r.partes_pendientes(1000, None).unwrap().into_iter().map(|t| t.asset_id).collect();
+        assert_eq!(ids, vec!["A1", "A2"], "los caducados vuelven ya; el fallo real sigue esperando");
+        assert_eq!(r.resumen().unwrap().con_error, 0);
+        assert_eq!(r.errores(10).unwrap(), vec!["IMG_A3 (original): fallo de red: corte"]);
+        // Sin penalización acumulada: el siguiente fallo vuelve a esperar solo 5 s.
+        r.registrar_fallo("A1", Original, "corte", 1000).unwrap();
+        assert_eq!(r.partes_pendientes(1005, None).unwrap().len(), 3);
     }
 
     #[test]

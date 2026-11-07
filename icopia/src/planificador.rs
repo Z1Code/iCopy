@@ -21,7 +21,7 @@ mod tests {
     use super::*;
 
     fn r(fin: FinRonda, verificadas: usize) -> ResultadoRonda {
-        ResultadoRonda { fin, listados: 0, verificadas, fallidas: 0 }
+        ResultadoRonda { fin, listados: 0, verificadas, fallidas: 0, aplazadas: 0 }
     }
 
     #[test]

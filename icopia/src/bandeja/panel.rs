@@ -223,6 +223,7 @@ pub fn vista(e: &EstadoUi, bytes_por_seg: Option<f64>, ahora_unix: i64) -> Vista
     let ind = indicador(e);
     let vel = bytes_por_seg.filter(|v| e.trabajando() && *v > 0.0);
     let titulo = match &e.fase {
+        Fase::Listando { .. } if d.renovando_enlaces => "Renovando enlaces de iCloud…".to_string(),
         Fase::Listando { vistos: 0 } => "Revisando iCloud…".to_string(),
         Fase::Listando { vistos } => format!("Revisando iCloud… ({} vistos)", miles(*vistos as u64)),
         Fase::Copiando { total, .. } => {
@@ -419,5 +420,14 @@ mod tests {
         assert_eq!(principal(&con(Fase::Verificando { hechas: 1, total: 2 })), Principal::Pausar);
         let sin = EstadoUi { detalle: Detalle { ultimo_listado: None, ..Detalle::default() }, ..con(Fase::Inactiva) };
         assert_eq!(vista(&sin, None, 0).linea, "Todavía no se ha revisado iCloud");
+    }
+
+    #[test]
+    fn relistado_tras_caducar_enlaces_se_explica() {
+        let mut e = EstadoUi::con_progreso(Fase::Listando { vistos: 300 }, &progreso(1, 2, 1, 2));
+        e.detalle.renovando_enlaces = true;
+        let v = vista(&e, None, 1000);
+        assert_eq!((v.titulo.as_str(), v.indicador), ("Renovando enlaces de iCloud…", Indicador::EnVivo));
+        assert_eq!(e.texto(), "Renovando enlaces de iCloud… (300 vistos)");
     }
 }

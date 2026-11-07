@@ -215,3 +215,124 @@ fn edicion_nueva_no_reanuda_el_part_viejo() {
     assert_eq!(std::fs::read(&final_).unwrap(), nuevo);
     assert!(!descarga::ruta_meta(&descarga::ruta_part(&final_)).exists());
 }
+
+/// URL con caducidad `e=<unix>` como las de iCloud (cvws-h2.icloud-content.com).
+fn con_caducidad(url: String, e: i64) -> String {
+    format!("{url}?o=x&e={e}&v=1")
+}
+
+fn errores(reg: &Mutex<Registro>) -> Vec<String> {
+    reg.lock().unwrap().errores(100).unwrap()
+}
+
+fn leer_bitacora(destino: &Path) -> String {
+    let Ok(dir) = std::fs::read_dir(destino.join(".icopia").join("logs")) else { return String::new() };
+    dir.map(|e| std::fs::read_to_string(e.unwrap().path()).unwrap()).collect()
+}
+
+#[test]
+fn enlace_a_punto_de_caducar_se_aplaza_sin_contar_fallo() {
+    let (a, b) = (jpeg(100), jpeg(200));
+    let s = servidor(vec![("/a", Comportamiento::Servir(a.clone())), ("/b", Comportamiento::Servir(b.clone()))]);
+    let ahora = motor::ahora();
+    let mut f = FuenteFalsa {
+        assets: vec![
+            // El primer trabajo ya caduca (p. ej. el listado tardó demasiado).
+            asset("A1", "IMG_0001", AGO, "PrimarySync", vec![parte(TipoParte::Original, &a, con_caducidad(s.url("/a"), ahora + 30), "JPG")]),
+            asset("A2", "IMG_0002", SEP, "PrimarySync", vec![parte(TipoParte::Original, &b, con_caducidad(s.url("/b"), ahora + 3600), "JPG")]),
+        ],
+        ..Default::default()
+    };
+    let d = tempfile::tempdir().unwrap();
+    let reg = nuevo_registro();
+    let r = ronda_con(d.path(), &reg, &mut f, 1, None);
+    assert_eq!((r.fin, r.fallidas, r.aplazadas, r.verificadas), (FinRonda::Relistar, 0, 1, 1));
+    assert_eq!(s.peticiones_a("/a").len(), 0, "no se descarga un enlace que va a caducar");
+    // Sigue pendiente, sin penalización: con enlace nuevo se copia en la ronda siguiente.
+    let p = reg.lock().unwrap().partes_pendientes(motor::ahora(), None).unwrap();
+    assert_eq!(p.len(), 1);
+    assert!(errores(&reg).is_empty(), "no se anota ningún fallo");
+    f.assets[0].partes[0].url = con_caducidad(s.url("/a"), motor::ahora() + 3600);
+    let r = ronda_con(d.path(), &reg, &mut f, 1, None);
+    assert_eq!((r.fin, r.verificadas, r.aplazadas), (FinRonda::Completa, 1, 0));
+}
+
+#[test]
+fn todo_caducado_tras_listar_reciente_se_intenta_igual() {
+    // Reloj desfasado: todo parece caducado nada más listar. No puede quedarse relistando sin fin.
+    let a = jpeg(100);
+    let s = servidor(vec![("/a", Comportamiento::Servir(a.clone())), ("/g", Comportamiento::Estado(410))]);
+    let pasado = motor::ahora() - 7200;
+    let mut f = FuenteFalsa {
+        assets: vec![
+            asset("A1", "IMG_0001", AGO, "PrimarySync", vec![parte(TipoParte::Original, &a, con_caducidad(s.url("/a"), pasado), "JPG")]),
+            asset("A2", "IMG_0002", SEP, "PrimarySync", vec![parte(TipoParte::Original, &a, con_caducidad(s.url("/g"), pasado), "JPG")]),
+        ],
+        ..Default::default()
+    };
+    let d = tempfile::tempdir().unwrap();
+    let reg = nuevo_registro();
+    let r = ronda_con(d.path(), &reg, &mut f, 1, None);
+    assert_eq!((r.verificadas, r.fallidas, r.aplazadas), (1, 1, 0));
+    assert_eq!(s.peticiones_a("/g").len(), 1);
+    assert_eq!(reg.lock().unwrap().partes_pendientes(motor::ahora(), None).unwrap().len(), 0, "el fallo cuenta y espera");
+}
+
+#[test]
+fn enlace_reciente_rechazado_cuenta_como_fallo_real() {
+    let a = jpeg(100);
+    let s = servidor(vec![("/g", Comportamiento::Estado(410))]);
+    let mut f = FuenteFalsa {
+        assets: vec![asset("A1", "IMG_0001", AGO, "PrimarySync", vec![parte(TipoParte::Original, &a, con_caducidad(s.url("/g"), motor::ahora() + 3600), "JPG")])],
+        ..Default::default()
+    };
+    let d = tempfile::tempdir().unwrap();
+    let reg = nuevo_registro();
+    let r = ronda_con(d.path(), &reg, &mut f, 1, None);
+    assert_eq!((r.fallidas, r.aplazadas), (1, 0));
+    // Relistar no borra un fallo real: si no, un asset roto se reintentaría sin fin.
+    ronda_con(d.path(), &reg, &mut f, 1, None);
+    assert!(reg.lock().unwrap().partes_pendientes(motor::ahora(), None).unwrap().is_empty());
+}
+
+#[test]
+fn aplazadas_dejan_una_sola_linea_en_la_bitacora() {
+    let a = jpeg(100);
+    let s = servidor(vec![("/a", Comportamiento::Servir(a.clone()))]);
+    let ahora = motor::ahora();
+    let mut assets = vec![asset("A0", "IMG_0000", AGO, "PrimarySync", vec![parte(TipoParte::Original, &a, con_caducidad(s.url("/a"), ahora + 3600), "JPG")])];
+    for i in 1..=5 {
+        assets.push(asset(&format!("A{i}"), &format!("IMG_000{i}"), SEP, "PrimarySync", vec![parte(TipoParte::Original, &a, con_caducidad(s.url("/a"), ahora + 10), "JPG")]));
+    }
+    let mut f = FuenteFalsa { assets, ..Default::default() };
+    let d = tempfile::tempdir().unwrap();
+    let r = ronda_con(d.path(), &nuevo_registro(), &mut f, 2, None);
+    assert_eq!((r.fin, r.aplazadas, r.fallidas), (FinRonda::Relistar, 5, 0));
+    let log = leer_bitacora(d.path());
+    assert!(!log.contains("FALLO"), "{log}");
+    assert_eq!(log.matches("ENLACES CADUCAN: 5 archivos aplazados hasta el próximo listado").count(), 1, "{log}");
+}
+
+#[test]
+fn enlace_que_caduca_a_media_ronda_aplaza_el_resto_sin_contar_fallos() {
+    let a = jpeg(100);
+    let s = servidor(vec![("/g", Comportamiento::EstadoTras { codigo: 410, ms: 3000 }), ("/a", Comportamiento::Servir(a.clone()))]);
+    let ahora = motor::ahora();
+    let lejos = ahora + 3600;
+    let mut f = FuenteFalsa {
+        assets: vec![
+            // Vale al empezar (122 s > margen de 120 s), pero cuando iCloud responde ya está en el margen.
+            asset("A1", "IMG_0001", AGO, "PrimarySync", vec![parte(TipoParte::Original, &a, con_caducidad(s.url("/g"), ahora + 122), "JPG")]),
+            asset("A2", "IMG_0002", SEP, "PrimarySync", vec![parte(TipoParte::Original, &a, con_caducidad(s.url("/a"), lejos), "JPG")]),
+            asset("A3", "IMG_0003", SEP, "PrimarySync", vec![parte(TipoParte::Original, &a, con_caducidad(s.url("/a"), lejos), "JPG")]),
+        ],
+        ..Default::default()
+    };
+    let d = tempfile::tempdir().unwrap();
+    let reg = nuevo_registro();
+    let r = ronda_con(d.path(), &reg, &mut f, 1, None);
+    assert_eq!((r.fin, r.fallidas, r.aplazadas, r.verificadas), (FinRonda::Relistar, 0, 3, 0));
+    assert_eq!(s.peticiones_a("/a").len(), 0, "tras la caducidad no se empiezan más descargas");
+    assert!(errores(&reg).is_empty());
+    assert_eq!(reg.lock().unwrap().partes_pendientes(motor::ahora(), None).unwrap().len(), 3);
+}

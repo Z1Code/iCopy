@@ -37,6 +37,8 @@ pub struct Detalle {
     pub ronda: Option<Ronda>,
     /// Cuándo está prevista la próxima ronda (unix), si se sabe.
     pub proxima: Option<i64>,
+    /// El listado en curso es para pedir enlaces nuevos (los anteriores caducaron).
+    pub renovando_enlaces: bool,
 }
 
 /// Lo que tiene que copiar la ronda actual, para medir su avance aparte del total.
@@ -93,6 +95,7 @@ impl EstadoUi {
                 actual: None,
                 ronda: None,
                 proxima: None,
+                renovando_enlaces: false,
             },
         }
     }
@@ -138,6 +141,7 @@ impl EstadoUi {
         let t = match &self.fase {
             Fase::Inactiva if self.total > 0 && self.verificadas == self.total => format!("Al día — {}", self.progreso()),
             Fase::Inactiva => format!("En espera — {}", self.progreso()),
+            Fase::Listando { vistos } if self.detalle.renovando_enlaces => format!("Renovando enlaces de iCloud… ({} vistos)", miles(*vistos as u64)),
             Fase::Listando { vistos } => format!("Revisando iCloud… ({} vistos)", miles(*vistos as u64)),
             Fase::Copiando { hechas, total } => {
                 let pct = self.porcentaje().map(|p| format!(" · {p} % del total")).unwrap_or_default();

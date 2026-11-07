@@ -16,6 +16,7 @@ fn main() {
         actual: Some("IMG_4821.HEIC (original)".into()),
         ronda: Some(Ronda { archivos: 9_400, bytes: 102_000_000_000, bytes_base: 54_000_000_000 }),
         proxima: Some(1_000_000 + 3 * 3600 + 55 * 60),
+        renovando_enlaces: false,
     };
     let estados = [
         (EstadoUi { fase: Fase::Copiando { hechas: 812, total: 9_400 }, verificadas: 18_200, total: 35_000, detalle: detalle.clone() }, Some(29_300_000.0), None, 0.3),

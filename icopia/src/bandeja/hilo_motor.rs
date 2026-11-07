@@ -65,6 +65,8 @@ fn bucle(
     let mut pausado = false;
     let mut espera: Option<Duration> = Some(Duration::ZERO);
     let mut ultimo_fin: Option<FinRonda> = None;
+    // La ronda anterior aplazó archivos por enlaces caducados: el próximo listado los renueva.
+    let mut renovar = false;
     emitir_resumen(&cargar_config(), Fase::Inactiva, emitir);
     loop {
         let orden = match espera {
@@ -128,7 +130,7 @@ fn bucle(
             emitir_resumen(&cargar_config(), Fase::Pausada, emitir);
             continue;
         }
-        espera = una_ronda(&cargar_config(), &http, cancelar, abrir_fuente, emitir, forzar, &mut ultimo_fin);
+        espera = una_ronda(&cargar_config(), &http, cancelar, abrir_fuente, emitir, forzar, &mut ultimo_fin, &mut renovar);
     }
 }
 
@@ -140,6 +142,7 @@ fn una_ronda(
     emitir: &(dyn Fn(EventoUi) + Sync),
     forzar: bool,
     ultimo_fin: &mut Option<FinRonda>,
+    renovar: &mut bool,
 ) -> Option<Duration> {
     let Some(destino) = cfg.destino.clone() else {
         emitir(EventoUi::Estado(EstadoUi::sin_datos(Fase::SinDestino)));
@@ -184,6 +187,7 @@ fn una_ronda(
     // Como mucho 4 avisos por segundo a la interfaz y una consulta al registro por segundo.
     let inicio = Instant::now() - Duration::from_secs(10);
     let ritmo = Mutex::new((inicio, inicio, registro.lock().unwrap().progreso().unwrap_or_default(), None::<Ronda>));
+    let renovando = std::mem::take(renovar);
     let avance = |a: Avance| {
         let (fase, actual, ultimo) = match a {
             Avance::Listando { vistos } => (Fase::Listando { vistos }, None, false),
@@ -213,6 +217,7 @@ fn una_ronda(
         let mut e = EstadoUi::con_progreso(fase, &r.2);
         e.detalle.actual = actual;
         e.detalle.ronda = r.3.clone();
+        e.detalle.renovando_enlaces = renovando && matches!(e.fase, Fase::Listando { .. });
         drop(r);
         emitir(EventoUi::Estado(e));
     };
@@ -236,7 +241,8 @@ fn una_ronda(
             espera
         }
         Ok(r) => {
-            bitacora::escribir(&dir_datos, &format!("RONDA {:?}: {} verificadas, {} fallidas", r.fin, r.verificadas, r.fallidas));
+            bitacora::escribir(&dir_datos, &format!("RONDA {:?}: {} verificadas, {} fallidas, {} aplazadas", r.fin, r.verificadas, r.fallidas, r.aplazadas));
+            *renovar = r.aplazadas > 0;
             if r.verificadas > 0 {
                 aviso(emitir, format!("{} archivos nuevos copiados y verificados", r.verificadas));
             }

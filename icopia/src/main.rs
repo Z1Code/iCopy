@@ -227,6 +227,9 @@ fn cmd_copiar(args: &[String]) -> Result<()> {
         drop(puente);
         eprintln!();
         println!("Ronda: {} archivos copiados y verificados, {} fallidos", r.verificadas, r.fallidas);
+        if r.aplazadas > 0 {
+            println!("{} archivos aplazados: sus enlaces de descarga caducan", r.aplazadas);
+        }
         match r.fin {
             FinRonda::Relistar => {
                 println!("Algunos enlaces de descarga caducaron; pido enlaces nuevos a iCloud…");

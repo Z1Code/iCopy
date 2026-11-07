@@ -29,6 +29,8 @@ pub struct ResultadoRonda {
     pub listados: usize,
     pub verificadas: usize,
     pub fallidas: usize,
+    /// No se intentaron (o se cortaron) porque su enlace caducaba: siguen pendientes, sin penalizar.
+    pub aplazadas: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -77,7 +79,32 @@ pub fn ahora() -> i64 {
 }
 
 fn resultado(fin: FinRonda, listados: usize) -> ResultadoRonda {
-    ResultadoRonda { fin, listados, verificadas: 0, fallidas: 0 }
+    ResultadoRonda { fin, listados, verificadas: 0, fallidas: 0, aplazadas: 0 }
+}
+
+/// No se empieza una descarga si su enlace caduca antes de `ahora + MARGEN + tamaño / RITMO_PRUDENTE`.
+const MARGEN_CADUCIDAD: i64 = 120;
+const RITMO_PRUDENTE: u64 = 2 * 1024 * 1024;
+/// Un rechazo (401/403/404/410) con un listado más reciente que esto es un fallo real del asset.
+pub const LISTADO_RECIENTE: i64 = 600;
+
+/// Caducidad (unix) del enlace de iCloud: parámetro `e` de la query. `None` si no lo trae.
+pub fn caducidad_url(url: &str) -> Option<i64> {
+    let sin_fragmento = url.split('#').next()?;
+    let (_, query) = sin_fragmento.split_once('?')?;
+    query.split('&').find_map(|kv| kv.strip_prefix("e=")).and_then(|v| v.parse().ok())
+}
+
+/// El enlace caducará antes de que dé tiempo a bajar `tamano` bytes a un ritmo prudente.
+pub fn caduca_pronto(url: &str, tamano: u64, ahora: i64) -> bool {
+    caducidad_url(url).is_some_and(|e| e <= ahora + MARGEN_CADUCIDAD + (tamano / RITMO_PRUDENTE) as i64)
+}
+
+/// Tras un rechazo del servidor: ¿se debe a que el enlace caducó (se pide otro sin penalizar)
+/// o es un fallo real del asset (cuenta como intento, para no reintentar sin fin)?
+/// `fiar_de_e` es falso cuando el reloj no cuadra con las caducidades (ver `ejecutar_ronda`).
+pub fn rechazo_por_caducidad(url: &str, fin_listado: i64, ahora: i64, fiar_de_e: bool) -> bool {
+    ahora - fin_listado > LISTADO_RECIENTE || (fiar_de_e && caducidad_url(url).is_some_and(|e| e <= ahora + MARGEN_CADUCIDAD))
 }
 
 /// Lista iCloud y lo vuelca al registro. Solo guarda la marca si el listado terminó bien.
@@ -136,24 +163,42 @@ pub fn ejecutar_ronda(
         Listado::Completo(n) => n,
         Listado::Interrumpido(fin, n) => return Ok(resultado(fin, n)),
     };
+    let fin_listado = ahora();
 
     let trabajos = registro.lock().unwrap().partes_pendientes(ahora(), op.mes.as_deref())?;
+    // Si nada más listar todos los enlaces parecen ya caducados, relistar no arreglaría nada
+    // (reloj desajustado o listado más largo que la vida de los enlaces): se ignora `e` y se intenta.
+    let mut con_e = trabajos.iter().filter(|t| caducidad_url(&t.url).is_some()).peekable();
+    let fiar_de_e = con_e.peek().is_none() || !con_e.all(|t| caduca_pronto(&t.url, t.tamano, fin_listado));
+    if !fiar_de_e {
+        bitacora::escribir(&dir_datos, "AVISO: todos los enlaces parecen caducados nada más listar (¿reloj desajustado?); se intentan igualmente");
+    }
     let total = trabajos.len();
     let cola = Mutex::new(VecDeque::from(trabajos));
     let hechas = AtomicUsize::new(0);
     let verificadas = AtomicUsize::new(0);
     let fallidas = AtomicUsize::new(0);
+    let aplazadas = AtomicUsize::new(0);
     let relistar = AtomicBool::new(false);
+    // Un enlace caducó a media descarga: lo que queda en la cola espera al próximo listado.
+    let parar = AtomicBool::new(false);
     let sin_espacio = AtomicBool::new(false);
 
     std::thread::scope(|s| {
         for _ in 0..op.concurrencia.max(1) {
             s.spawn(|| loop {
-                // Un enlace caducado solo afecta a su parte: se termina la cola y luego se pide relistar.
-                if cancelar.load(Ordering::Relaxed) || sin_espacio.load(Ordering::Relaxed) {
+                if cancelar.load(Ordering::Relaxed) || sin_espacio.load(Ordering::Relaxed) || parar.load(Ordering::Relaxed) {
                     break;
                 }
                 let Some(t) = cola.lock().unwrap().pop_front() else { break };
+                // Enlace a punto de caducar: no se descarga ni cuenta como fallo; queda pendiente
+                // y se sigue con los demás (los que aún valen se aprovechan antes de relistar).
+                if fiar_de_e && caduca_pronto(&t.url, t.tamano, ahora()) {
+                    aplazadas.fetch_add(1, Ordering::Relaxed);
+                    relistar.store(true, Ordering::Relaxed);
+                    hechas.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
                 if !disco::cabe(destino, t.tamano) {
                     sin_espacio.store(true, Ordering::Relaxed);
                     break;
@@ -168,11 +213,21 @@ pub fn ejecutar_ronda(
                         verificadas.fetch_add(1, Ordering::Relaxed);
                     }
                     Err(ErrorParte::Cancelada) => break,
+                    Err(ErrorParte::Descarga(ErrorDescarga::UrlCaducada(_))) if rechazo_por_caducidad(&t.url, fin_listado, ahora(), fiar_de_e) => {
+                        aplazadas.fetch_add(1, Ordering::Relaxed);
+                        relistar.store(true, Ordering::Relaxed);
+                        parar.store(true, Ordering::Relaxed);
+                    }
                     Err(e) => {
-                        if matches!(e, ErrorParte::Descarga(ErrorDescarga::UrlCaducada(_))) {
-                            relistar.store(true, Ordering::Relaxed);
-                        }
-                        let msg = e.to_string();
+                        let msg = match e {
+                            // Enlace recién pedido y aun así rechazado: fallo real, con otro texto que
+                            // "enlace de descarga caducado" para que relistar no lo perdone.
+                            ErrorParte::Descarga(ErrorDescarga::UrlCaducada(c)) => {
+                                relistar.store(true, Ordering::Relaxed);
+                                format!("iCloud rechazó un enlace recién pedido (HTTP {c})")
+                            }
+                            otro => otro.to_string(),
+                        };
                         bitacora::escribir(&dir_datos, &format!("FALLO {} {} ({}): {msg}", t.nombre_base, t.tipo.como_str(), t.asset_id));
                         let _ = registro.lock().unwrap().registrar_fallo(&t.asset_id, t.tipo, &msg, ahora());
                         fallidas.fetch_add(1, Ordering::Relaxed);
@@ -183,6 +238,14 @@ pub fn ejecutar_ronda(
             });
         }
     });
+
+    if parar.load(Ordering::Relaxed) && !cancelar.load(Ordering::Relaxed) && !sin_espacio.load(Ordering::Relaxed) {
+        aplazadas.fetch_add(cola.lock().unwrap().len(), Ordering::Relaxed);
+    }
+    let aplazadas = aplazadas.load(Ordering::Relaxed);
+    if aplazadas > 0 {
+        bitacora::escribir(&dir_datos, &format!("ENLACES CADUCAN: {aplazadas} archivos aplazados hasta el próximo listado"));
+    }
 
     let fin = if cancelar.load(Ordering::Relaxed) {
         FinRonda::Cancelada
@@ -198,6 +261,7 @@ pub fn ejecutar_ronda(
         listados,
         verificadas: verificadas.load(Ordering::Relaxed),
         fallidas: fallidas.load(Ordering::Relaxed),
+        aplazadas,
     })
 }
 
@@ -254,5 +318,49 @@ fn procesar_parte(destino: &Path, registro: &Mutex<Registro>, http: &Client, t: 
             descarga::borrar_part(&part);
             Err(ErrorParte::Verificacion(f))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const URL: &str = "https://cvws-h2.icloud-content.com/B/AbC/${f}?o=AtX&v=1&x=3&a=CAog&e=1762538400&fl=&r=d1&k=$k&ckc=com.apple.photos.cloud";
+
+    #[test]
+    fn lee_la_caducidad_del_enlace() {
+        assert_eq!(caducidad_url(URL), Some(1_762_538_400));
+        assert_eq!(caducidad_url("http://x/a?e=5"), Some(5));
+        assert_eq!(caducidad_url("http://x/a?le=5&e=7#frag"), Some(7));
+        assert_eq!(caducidad_url("http://x/a"), None);
+        assert_eq!(caducidad_url("http://x/a?e="), None);
+        assert_eq!(caducidad_url("http://x/a?v=1"), None);
+    }
+
+    #[test]
+    fn caduca_pronto_cuenta_margen_y_tamano() {
+        let e = 1_762_538_400;
+        assert!(!caduca_pronto(URL, 1000, e - 121));
+        assert!(caduca_pronto(URL, 1000, e - 120));
+        // 200 MiB a 2 MiB/s = 100 s más de margen.
+        assert!(caduca_pronto(URL, 200 * 1024 * 1024, e - 220));
+        assert!(!caduca_pronto(URL, 200 * 1024 * 1024, e - 221));
+        assert!(!caduca_pronto("http://x/sin-caducidad", u64::MAX / 2, 0), "sin `e` no se aplaza nunca");
+    }
+
+    #[test]
+    fn rechazo_reciente_es_fallo_real_y_tardio_es_caducidad() {
+        let e = 1_762_538_400;
+        // Listado reciente y `e` lejos: el asset está roto de verdad.
+        assert!(!rechazo_por_caducidad(URL, e - 3000, e - 2500, true));
+        // `e` alcanzado (o a punto): caducidad.
+        assert!(rechazo_por_caducidad(URL, e - 500, e - 60, true));
+        assert!(rechazo_por_caducidad(URL, e - 500, e + 10, true));
+        // Listado de hace más de 10 min: caducidad aunque no haya `e`.
+        assert!(rechazo_por_caducidad("http://x/a", 1000, 1000 + 601, true));
+        assert!(!rechazo_por_caducidad("http://x/a", 1000, 1000 + 600, true));
+        // Sin fiarse de `e` (reloj desajustado) solo cuenta la antigüedad del listado.
+        assert!(!rechazo_por_caducidad(URL, e + 5000, e + 5100, false));
+        assert!(rechazo_por_caducidad(URL, e + 5000, e + 5700, false));
     }
 }

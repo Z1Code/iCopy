@@ -11,6 +11,8 @@ pub enum Comportamiento {
     Servir(Vec<u8>),
     CortarPrimeraVez { datos: Vec<u8>, tras: usize },
     Estado(u16),
+    /// Responde `codigo` tras esperar `ms` (p. ej. un enlace que caduca mientras se pide).
+    EstadoTras { codigo: u16, ms: u64 },
 }
 
 #[derive(Debug, Clone)]
@@ -59,7 +61,8 @@ fn atender(mut stream: TcpStream, mapa: &HashMap<String, Comportamiento>, petici
     if lector.read_line(&mut primera).is_err() {
         return;
     }
-    let ruta = primera.split_whitespace().nth(1).unwrap_or("/").to_string();
+    // La query (p. ej. `?e=<caducidad>`) no cuenta para elegir la ruta.
+    let ruta = primera.split_whitespace().nth(1).unwrap_or("/").split('?').next().unwrap_or("/").to_string();
     let mut rango = None;
     loop {
         let mut l = String::new();
@@ -89,6 +92,10 @@ fn atender(mut stream: TcpStream, mapa: &HashMap<String, Comportamiento>, petici
         }
         Some(Comportamiento::Estado(c)) => {
             let _ = write!(stream, "HTTP/1.1 {c} X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        }
+        Some(Comportamiento::EstadoTras { codigo, ms }) => {
+            std::thread::sleep(std::time::Duration::from_millis(*ms));
+            let _ = write!(stream, "HTTP/1.1 {codigo} X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         }
         Some(Comportamiento::Servir(datos)) => enviar(&mut stream, datos, desde, None),
         Some(Comportamiento::CortarPrimeraVez { datos, tras }) => {
