@@ -1,6 +1,7 @@
 //! Ventana del panel de progreso: sin bordes, esquinas redondeadas, encima de la bandeja,
 //! junto al reloj (como los paneles de Wi-Fi o volumen de Windows 11).
 use crate::bandeja::estado::EstadoUi;
+use crate::bandeja::hover::{self, Hover};
 use crate::bandeja::panel::{es_nueva_ronda, principal, vista, Principal, Velocimetro};
 use crate::bandeja::panel_gdi::{self, Boton, Lienzo};
 use crate::descarga::BYTES_RECIBIDOS;
@@ -34,6 +35,10 @@ pub struct Panel {
     /// Última posición del ratón (píxeles a 96 ppp): un clic siempre llega con el ratón dentro.
     cursor: (f64, f64),
     oculto_en: Option<Instant>,
+    /// Abrir/cerrar al pasar el ratón por el icono.
+    raton: Hover,
+    /// Punto del icono de la bandeja (para colocar el panel).
+    ancla: (i32, i32),
     velocimetro: Velocimetro,
     ultima_muestra: Option<Instant>,
     t0: Instant,
@@ -66,6 +71,8 @@ impl Panel {
             pulsado: None,
             cursor: (-1.0, -1.0),
             oculto_en: None,
+            raton: Hover::default(),
+            ancla: (0, 0),
             velocimetro: Velocimetro::default(),
             ultima_muestra: None,
             t0: Instant::now(),
@@ -77,7 +84,39 @@ impl Panel {
     }
 
     pub fn visible(&self) -> bool {
-        self.ventana.is_visible()
+        unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible(self.ventana.hwnd() as HWND) != 0 }
+    }
+
+    fn segundos(&self) -> f64 {
+        self.t0.elapsed().as_secs_f64()
+    }
+
+    /// El ratón entra en el icono de la bandeja (o se mueve por él) o sale de él.
+    pub fn raton_en_icono(&mut self, encima: bool, ancla: Option<(i32, i32)>) {
+        if let Some(a) = ancla {
+            self.ancla = a;
+        }
+        let t = self.segundos();
+        self.raton.icono(encima, t);
+    }
+
+    /// Avanza los temporizadores del paso del ratón; abre o cierra el panel si toca.
+    pub fn tick_raton(&mut self, estado: &EstadoUi) {
+        match self.raton.tick(self.segundos()) {
+            Some(hover::Orden::Abrir) => self.mostrar(self.ancla, estado, false),
+            Some(hover::Orden::Cerrar) => self.ocultar(),
+            None => {}
+        }
+    }
+
+    /// ¿Cree que el ratón está sobre el icono? (la bandeja comprueba cuándo sale)
+    pub fn raton_sobre_icono(&self) -> bool {
+        self.raton.sobre_icono()
+    }
+
+    /// ¿Hay que despertar pronto el bucle por el paso del ratón?
+    pub fn raton_pendiente(&self) -> bool {
+        self.raton.pendiente()
     }
 
     /// Muestrea el contador de bytes descargados (para la velocidad), como mucho dos veces por segundo.
@@ -101,17 +140,24 @@ impl Panel {
 
     /// Clic en el icono de la bandeja: abre o cierra el panel. `ancla` es un punto del icono.
     pub fn alternar(&mut self, ancla: (i32, i32), estado: &EstadoUi) {
-        if self.visible() {
+        self.ancla = ancla;
+        if self.visible() && !self.raton.fijado() {
+            // Abierto al pasar el ratón: el clic lo deja fijo (y con el foco).
+            self.raton.fijar();
+            self.ventana.set_focus();
+        } else if self.visible() {
             self.ocultar();
         } else if self.oculto_en.is_some_and(|t| t.elapsed() < Duration::from_millis(400)) {
             // Ese mismo clic acaba de quitarle el foco al panel y cerrarlo: no se reabre.
             self.oculto_en = None;
         } else {
-            self.mostrar(ancla, estado);
+            self.raton.fijar();
+            self.mostrar(ancla, estado, true);
         }
     }
 
-    pub fn mostrar(&mut self, ancla: (i32, i32), estado: &EstadoUi) {
+    /// Muestra el panel junto a la bandeja; con ctivar, además le da el foco.
+    pub fn mostrar(&mut self, ancla: (i32, i32), estado: &EstadoUi, activar: bool) {
         unsafe {
             use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
             let monitor = gdi::MonitorFromPoint(POINT { x: ancla.0, y: ancla.1 }, gdi::MONITOR_DEFAULTTONEAREST);
@@ -135,8 +181,14 @@ impl Panel {
         self.oscuro = panel_gdi::tema_oscuro();
         self.hover = None;
         self.pintar(estado);
-        self.ventana.set_visible(true);
-        self.ventana.set_focus();
+        if activar {
+            self.ventana.set_visible(true);
+            self.ventana.set_focus();
+        } else {
+            // Al pasar el ratón no se roba el foco a lo que el usuario esté haciendo.
+            use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_SHOWNOACTIVATE};
+            unsafe { ShowWindow(self.ventana.hwnd() as HWND, SW_SHOWNOACTIVATE) };
+        }
         self.volcar();
     }
 
@@ -144,6 +196,7 @@ impl Panel {
         if self.visible() {
             self.ventana.set_visible(false);
         }
+        self.raton.cerrado();
         self.oculto_en = Some(Instant::now());
     }
 
@@ -194,6 +247,12 @@ impl Panel {
     pub fn evento(&mut self, e: &WindowEvent, estado: &EstadoUi) -> Option<Accion> {
         match e {
             WindowEvent::Focused(false) => self.ocultar(),
+            // Un clic dentro de un panel abierto al pasar el ratón le da el foco: queda fijo.
+            WindowEvent::Focused(true) => self.raton.fijar(),
+            WindowEvent::CursorEntered { .. } => {
+                let t = self.segundos();
+                self.raton.panel(true, t);
+            }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed && event.logical_key == Key::Escape => self.ocultar(),
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x / self.escala as f64, position.y / self.escala as f64);
@@ -203,9 +262,12 @@ impl Panel {
                     self.refrescar(estado);
                 }
             }
-            WindowEvent::CursorLeft { .. } if self.hover.is_some() => {
-                self.hover = None;
-                self.refrescar(estado);
+            WindowEvent::CursorLeft { .. } => {
+                let t = self.segundos();
+                self.raton.panel(false, t);
+                if self.hover.take().is_some() {
+                    self.refrescar(estado);
+                }
             }
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => self.pulsado = panel_gdi::boton_en(self.cursor.0, self.cursor.1),
             WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. } => {

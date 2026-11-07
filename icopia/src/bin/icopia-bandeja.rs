@@ -24,6 +24,20 @@ enum Ev {
     Progreso(icopia::registro::Progreso),
 }
 
+fn cursor_en_icono(t: &TrayIcon) -> bool {
+    let Some(r) = t.rect() else { return false };
+    let mut p = windows_sys::Win32::Foundation::POINT { x: 0, y: 0 };
+    if unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut p) } == 0 {
+        return false;
+    }
+    let (x, y) = (r.position.x as i32, r.position.y as i32);
+    p.x >= x && p.x < x + r.size.width as i32 && p.y >= y && p.y < y + r.size.height as i32
+}
+
+fn centro_de(r: &tray_icon::Rect) -> (i32, i32) {
+    (r.position.x as i32 + r.size.width as i32 / 2, r.position.y as i32 + r.size.height as i32 / 2)
+}
+
 /// Mientras el panel está abierto, relee el registro cada segundo (solo lectura, en su hilo)
 /// para que los totales nunca sean un dato viejo.
 fn sondear_registro(abierto: Arc<AtomicBool>, proxy: tao::event_loop::EventLoopProxy<Ev>) {
@@ -176,6 +190,8 @@ fn main() {
     let mut estado = EstadoUi::sin_datos(Fase::Inactiva);
     let mut pausado = false;
     let mut ultimo_refresco = Instant::now();
+    let mut tooltip = String::from("icopia");
+    let mut tooltip_puesto: Option<String> = Some(tooltip.clone());
 
     let (tx_pausa, cancelar_pausa) = (tx.clone(), cancelar.clone());
     let alternar_pausa = move |pausado: &mut bool, i_pausa: &MenuItem| {
@@ -214,8 +230,8 @@ fn main() {
             Event::UserEvent(Ev::Ui(EventoUi::Estado(e))) => {
                 let t = e.texto();
                 i_estado.set_text(&t);
+                tooltip = format!("icopia — {t}");
                 if let Some(tr) = &tray {
-                    let _ = tr.set_tooltip(Some(format!("icopia — {t}")));
                     if e.color() != estado.color() || estado.fase == Fase::Inactiva && estado.total == 0 {
                         let _ = tr.set_icon(Some(icono_de(e.color())));
                     }
@@ -236,10 +252,19 @@ fn main() {
             }
             Event::UserEvent(Ev::Progreso(p)) => estado.actualizar_progreso(&p),
             Event::UserEvent(Ev::Ui(EventoUi::Aviso { titulo, texto })) => avisos::mostrar(&titulo, &texto),
+            Event::UserEvent(Ev::Bandeja(TrayIconEvent::Enter { rect, .. } | TrayIconEvent::Move { rect, .. })) => {
+                if let Some(p) = panel.as_mut() {
+                    p.raton_en_icono(true, Some(centro_de(&rect)));
+                }
+            }
+            Event::UserEvent(Ev::Bandeja(TrayIconEvent::Leave { .. })) => {
+                if let Some(p) = panel.as_mut() {
+                    p.raton_en_icono(false, None);
+                }
+            }
             Event::UserEvent(Ev::Bandeja(TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, rect, .. })) => {
                 if let Some(p) = panel.as_mut() {
-                    let centro = (rect.position.x as i32 + rect.size.width as i32 / 2, rect.position.y as i32 + rect.size.height as i32 / 2);
-                    p.alternar(centro, &estado);
+                    p.alternar(centro_de(&rect), &estado);
                 }
             }
             Event::WindowEvent { window_id, event, .. } if panel.as_ref().is_some_and(|p| p.id() == window_id) => {
@@ -280,6 +305,22 @@ fn main() {
             _ => {}
         }
         if let Some(p) = panel.as_mut() {
+            // tray-icon no siempre avisa de que el ratón salió del icono: se comprueba aquí.
+            if p.raton_sobre_icono() && !tray.as_ref().is_some_and(cursor_en_icono) {
+                p.raton_en_icono(false, None);
+            }
+            p.tick_raton(&estado);
+            if p.raton_pendiente() || p.raton_sobre_icono() {
+                espera = espera.min(Duration::from_millis(50));
+            }
+            // Con el panel abierto no se muestra el tooltip (se solaparían).
+            let quiero = if p.visible() { None } else { Some(tooltip.clone()) };
+            if quiero != tooltip_puesto {
+                if let Some(tr) = &tray {
+                    let _ = tr.set_tooltip(quiero.as_deref());
+                }
+                tooltip_puesto = quiero;
+            }
             panel_abierto.store(p.visible(), Ordering::Relaxed);
             p.muestrear();
             if p.visible() {

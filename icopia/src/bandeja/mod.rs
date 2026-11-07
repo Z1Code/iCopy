@@ -7,3 +7,4 @@ pub mod icono;
 pub mod panel;
 pub mod panel_gdi;
 pub mod panel_ventana;
+pub mod hover;

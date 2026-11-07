@@ -57,6 +57,9 @@ struct Paleta {
     pista: Rgb,
     acento: Rgb,
     texto_acento: Rgb,
+    /// Relleno del botón principal: azul profundo para que el texto blanco tenga contraste (≥ 4,5:1).
+    boton_acento: Rgb,
+    boton_acento_hover: Rgb,
     boton: Rgb,
     boton_hover: Rgb,
     borde_boton: Rgb,
@@ -77,6 +80,8 @@ const CLARA: Paleta = Paleta {
     pista: [214, 214, 214],
     acento: [0, 95, 184],
     texto_acento: [255, 255, 255],
+    boton_acento: [0, 95, 184],
+    boton_acento_hover: [0, 84, 163],
     boton: [251, 251, 251],
     boton_hover: [246, 246, 246],
     borde_boton: [216, 216, 216],
@@ -96,7 +101,9 @@ const OSCURA: Paleta = Paleta {
     secundario: [200, 200, 200],
     pista: [72, 72, 72],
     acento: [96, 205, 255],
-    texto_acento: [0, 0, 0],
+    texto_acento: [255, 255, 255],
+    boton_acento: [0, 95, 184],
+    boton_acento_hover: [0, 108, 207],
     boton: [55, 55, 55],
     boton_hover: [62, 62, 62],
     borde_boton: [70, 70, 70],
@@ -105,10 +112,6 @@ const OSCURA: Paleta = Paleta {
     naranja: [252, 160, 70],
     rojo: [255, 153, 164],
 };
-
-fn mezclar(a: Rgb, b: Rgb, t: f32) -> Rgb {
-    [0, 1, 2].map(|i| (a[i] as f32 + (b[i] as f32 - a[i] as f32) * t).round() as u8)
-}
 
 fn colorref(c: Rgb) -> u32 {
     c[0] as u32 | (c[1] as u32) << 8 | (c[2] as u32) << 16
@@ -297,7 +300,8 @@ pub fn pintar(l: &mut Lienzo, v: &Vista, oscuro: bool, escala: f32, hover: Optio
     let f_peq = Fuente::nueva(e(12), false);
     let f_norm = Fuente::nueva(e(13), false);
     let f_nombre = Fuente::nueva(e(14), true);
-    let f_titulo = Fuente::nueva(e(20), true);
+    let f_titulo = Fuente::nueva(e(18), true);
+    let f_boton = Fuente::nueva(e(13), true);
     let etiqueta = v.indicador.texto();
     let ancho_etq = ancho_texto(l.dc, &f_peq, etiqueta);
     let punto_x = w - e(P) - ancho_etq - e(14);
@@ -337,10 +341,10 @@ pub fn pintar(l: &mut Lienzo, v: &Vista, oscuro: bool, escala: f32, hover: Optio
     for b in [Boton::Pausa, Boton::Carpeta] {
         let (bx, by, bw, bh) = rect_boton(b);
         let (fondo, borde) = match b {
-            Boton::Pausa => (p.acento, p.acento),
+            Boton::Pausa => (if hover == Some(b) { p.boton_acento_hover } else { p.boton_acento }, p.boton_acento),
             Boton::Carpeta => (if hover == Some(b) { p.boton_hover } else { p.boton }, p.borde_boton),
         };
-        let fondo = if b == Boton::Pausa && hover == Some(b) { mezclar(fondo, p.fondo, 0.12) } else { fondo };
+
         l.caja(e(bx), e(by), e(bw), e(bh), e(4), borde, 1.0);
         l.caja(e(bx) + 1.0, e(by) + 1.0, e(bw) - 2.0, e(bh) - 2.0, e(4) - 1.0, fondo, 1.0);
     }
@@ -367,6 +371,34 @@ pub fn pintar(l: &mut Lienzo, v: &Vista, oscuro: bool, escala: f32, hover: Optio
             Boton::Pausa => (v.principal.texto(), p.texto_acento),
             Boton::Carpeta => ("Abrir carpeta", p.texto),
         };
-        texto(dc, &f_norm, rotulo, color, (e(bx), e(by), e(bw), e(bh)), Alinear::Centro);
+        let fuente = if b == Boton::Pausa { &f_boton } else { &f_norm };
+        texto(dc, fuente, rotulo, color, (e(bx), e(by), e(bw), e(bh)), Alinear::Centro);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn luminancia(c: Rgb) -> f64 {
+        let lin = |v: u8| {
+            let v = v as f64 / 255.0;
+            if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+        };
+        0.2126 * lin(c[0]) + 0.7152 * lin(c[1]) + 0.0722 * lin(c[2])
+    }
+
+    fn contraste(a: Rgb, b: Rgb) -> f64 {
+        let (x, y) = (luminancia(a), luminancia(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    #[test]
+    fn texto_del_boton_principal_se_lee_en_ambos_temas() {
+        for p in [&CLARA, &OSCURA] {
+            assert!(contraste(p.texto_acento, p.boton_acento) >= 4.5);
+            assert!(contraste(p.texto_acento, p.boton_acento_hover) >= 4.5);
+            assert!(contraste(p.texto, p.boton) >= 4.5);
+        }
     }
 }
