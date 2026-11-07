@@ -32,8 +32,9 @@ fn icono_de(color: icopia::bandeja::estado::Color) -> Icon {
 /// Abre `icopia.exe <sub> --pausa` en una consola nueva, pausando la copia mientras tanto.
 fn lanzar_consola(sub: &str, tx: &mpsc::Sender<Orden>, cancelar: &AtomicBool, ya_pausado: bool) {
     if !ya_pausado {
-        cancelar.store(true, Ordering::SeqCst);
+        // Primero la orden y luego `cancelar`: así el hilo del motor no puede perder la pausa.
         let _ = tx.send(Orden::Pausar);
+        cancelar.store(true, Ordering::SeqCst);
     }
     let exe = std::env::current_exe().expect("ruta del exe").with_file_name("icopia.exe");
     let sub = sub.to_string();
@@ -146,8 +147,8 @@ fn main() {
                 } else {
                     pausado = true;
                     i_pausa.set_text("Reanudar");
-                    cancelar.store(true, Ordering::SeqCst);
                     let _ = tx.send(Orden::Pausar);
+                    cancelar.store(true, Ordering::SeqCst);
                 }
             } else if id == *i_verificar.id() {
                 let _ = tx.send(Orden::Verificar);

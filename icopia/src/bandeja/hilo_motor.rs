@@ -13,7 +13,7 @@ use crate::registro::Registro;
 use reqwest::blocking::Client;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -101,7 +101,33 @@ fn bucle(
             espera = None;
             continue;
         }
-        cancelar.store(false, Ordering::SeqCst);
+        // Una orden llegada justo antes de borrar `cancelar` (p. ej. Pausar) no debe perderse:
+        // tras borrarlo se atiende lo que haya en la cola, hasta que esté vacía.
+        loop {
+            cancelar.store(false, Ordering::SeqCst);
+            let mut hubo = false;
+            loop {
+                match rx.try_recv() {
+                    Ok(Orden::Salir) | Err(TryRecvError::Disconnected) => return,
+                    Ok(Orden::Pausar) => pausado = true,
+                    Ok(Orden::Reanudar) | Ok(Orden::CopiarAhora) => {
+                        pausado = false;
+                        forzar = true;
+                    }
+                    Ok(Orden::Verificar) => verificar(&cargar_config(), cancelar, emitir),
+                    Err(TryRecvError::Empty) => break,
+                }
+                hubo = true;
+            }
+            if !hubo || pausado {
+                break;
+            }
+        }
+        if pausado {
+            espera = None;
+            emitir_resumen(&cargar_config(), Fase::Pausada, emitir);
+            continue;
+        }
         espera = una_ronda(&cargar_config(), &http, cancelar, abrir_fuente, emitir, forzar, &mut ultimo_fin);
     }
 }
