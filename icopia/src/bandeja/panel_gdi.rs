@@ -7,9 +7,9 @@ use windows_sys::Win32::Graphics::Gdi as gdi;
 
 /// Tamaño del panel en píxeles a 96 ppp.
 pub const ANCHO: i32 = 360;
-pub const ALTO: i32 = 352;
+pub const ALTO: i32 = 372;
 const P: i32 = 16;
-const PIE: i32 = 288; // empieza el pie con los botones
+const PIE: i32 = 308; // empieza el pie con los botones
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Boton {
@@ -312,10 +312,20 @@ pub fn pintar(l: &mut Lienzo, v: &Vista, oscuro: bool, escala: f32, hover: Optio
     let ancho_util = w - 2.0 * e(P);
     let barra_y = e(92);
     l.caja(e(P), barra_y, ancho_util, e(4), e(2), p.pista, 1.0);
-    if v.fraccion > 0.0 {
-        l.caja(e(P), barra_y, (ancho_util * v.fraccion as f32).max(e(4)), e(4), e(2), p.acento, 1.0);
+    match v.fraccion {
+        Some(f) if f > 0.0 => l.caja(e(P), barra_y, (ancho_util * f as f32).max(e(4)), e(4), e(2), p.acento, 1.0),
+        Some(_) => {}
+        None => {
+            // Indeterminada: un tramo que recorre la barra.
+            let tramo = ancho_util * 0.3;
+            let x = e(P) - tramo + (ancho_util + tramo) * pulso;
+            let (x0, x1) = (x.max(e(P)), (x + tramo).min(e(P) + ancho_util));
+            if x1 > x0 {
+                l.caja(x0, barra_y, x1 - x0, e(4), e(2), p.acento, 1.0);
+            }
+        }
     }
-    let tarjeta_y = e(132);
+    let tarjeta_y = e(152);
     let fila = e(34);
     l.caja(e(P), tarjeta_y, ancho_util, fila * 4.0 + e(4), e(8), p.borde_tarjeta, 1.0);
     l.caja(e(P) + 1.0, tarjeta_y + 1.0, ancho_util - 2.0, fila * 4.0 + e(4) - 2.0, e(8) - 1.0, p.tarjeta, 1.0);
@@ -340,7 +350,8 @@ pub fn pintar(l: &mut Lienzo, v: &Vista, oscuro: bool, escala: f32, hover: Optio
     texto(dc, &f_nombre, "icopia", p.texto, (e(P + 28), e(16), e(120), e(24)), Alinear::Izq);
     texto(dc, &f_peq, etiqueta, p.secundario, (w - e(P) - ancho_etq - e(2), e(16), ancho_etq + e(2), e(24)), Alinear::Der);
     texto(dc, &f_titulo, &v.titulo, p.texto, (e(P), e(50), ancho_util, e(32)), Alinear::Izq);
-    texto(dc, &f_peq, &v.linea, p.secundario, (e(P), e(104), ancho_util, e(18)), Alinear::Izq);
+    texto(dc, &f_peq, &v.linea, p.texto, (e(P), e(104), ancho_util, e(18)), Alinear::Izq);
+    texto(dc, &f_peq, &v.linea_total, p.secundario, (e(P), e(124), ancho_util, e(18)), Alinear::Izq);
     let filas = [("Ahora", &v.ahora), ("Velocidad", &v.velocidad), ("Último listado de iCloud", &v.listado), ("Errores", &v.errores)];
     for (i, (nombre, valor)) in filas.iter().enumerate() {
         let y = tarjeta_y + e(2) + fila * i as f32;
@@ -353,7 +364,7 @@ pub fn pintar(l: &mut Lienzo, v: &Vista, oscuro: bool, escala: f32, hover: Optio
     for b in [Boton::Pausa, Boton::Carpeta] {
         let (bx, by, bw, bh) = rect_boton(b);
         let (rotulo, color) = match b {
-            Boton::Pausa => (if v.pausado { "Reanudar" } else { "Pausar" }, p.texto_acento),
+            Boton::Pausa => (v.principal.texto(), p.texto_acento),
             Boton::Carpeta => ("Abrir carpeta", p.texto),
         };
         texto(dc, &f_norm, rotulo, color, (e(bx), e(by), e(bw), e(bh)), Alinear::Centro);

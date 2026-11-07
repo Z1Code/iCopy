@@ -1,6 +1,6 @@
 //! Renderiza el panel de progreso de la bandeja en varios estados (claro y oscuro) a un PNG,
 //! para revisarlo sin abrir la bandeja. Uso: `cargo run --example panel_demo -- salida.png [escala]`
-use icopia::bandeja::estado::{Detalle, EstadoUi, Fase};
+use icopia::bandeja::estado::{Detalle, EstadoUi, Fase, Ronda};
 use icopia::bandeja::panel::vista;
 use icopia::bandeja::panel_gdi::{self, Boton, Lienzo};
 
@@ -14,6 +14,8 @@ fn main() {
         con_error: 0,
         ultimo_listado: Some(1_000_000 - 5 * 60),
         actual: Some("IMG_4821.HEIC (original)".into()),
+        ronda: Some(Ronda { archivos: 9_400, bytes: 102_000_000_000, bytes_base: 54_000_000_000 }),
+        proxima: Some(1_000_000 + 3 * 3600 + 55 * 60),
     };
     let estados = [
         (EstadoUi { fase: Fase::Copiando { hechas: 812, total: 9_400 }, verificadas: 18_200, total: 35_000, detalle: detalle.clone() }, Some(29_300_000.0), None, 0.3),

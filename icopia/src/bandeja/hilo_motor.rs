@@ -1,6 +1,6 @@
 //! Hilo que ejecuta rondas periódicas y obedece órdenes del menú.
 use crate::auditoria;
-use crate::bandeja::estado::{EstadoUi, EventoUi, Fase};
+use crate::bandeja::estado::{EstadoUi, EventoUi, Fase, Ronda};
 use crate::bitacora;
 use crate::cerrojo;
 use crate::config::Config;
@@ -183,13 +183,22 @@ fn una_ronda(
     };
     // Como mucho 4 avisos por segundo a la interfaz y una consulta al registro por segundo.
     let inicio = Instant::now() - Duration::from_secs(10);
-    let ritmo = Mutex::new((inicio, inicio, registro.lock().unwrap().progreso().unwrap_or_default()));
+    let ritmo = Mutex::new((inicio, inicio, registro.lock().unwrap().progreso().unwrap_or_default(), None::<Ronda>));
     let avance = |a: Avance| {
         let (fase, actual, ultimo) = match a {
             Avance::Listando { vistos } => (Fase::Listando { vistos }, None, false),
             Avance::Copiando { hechas, total, actual } => (Fase::Copiando { hechas, total }, Some(actual), hechas == total),
         };
         let mut r = ritmo.lock().unwrap();
+        if let (Fase::Copiando { total, .. }, None) = (&fase, &r.3) {
+            // Primer archivo de la ronda: se mide su trabajo para mostrar su propio avance.
+            let reg = registro.lock().unwrap();
+            let bytes = reg.partes_pendientes(motor::ahora(), None).map(|v| v.iter().map(|t| t.tamano).sum()).unwrap_or(0);
+            if let Ok(p) = reg.progreso() {
+                r.2 = p;
+            }
+            r.3 = Some(Ronda { archivos: *total as u64, bytes, bytes_base: r.2.bytes_verificados });
+        }
         let ahora = Instant::now();
         if !ultimo && ahora.duration_since(r.0) < Duration::from_millis(250) {
             return;
@@ -203,6 +212,7 @@ fn una_ronda(
         }
         let mut e = EstadoUi::con_progreso(fase, &r.2);
         e.detalle.actual = actual;
+        e.detalle.ronda = r.3.clone();
         drop(r);
         emitir(EventoUi::Estado(e));
     };
@@ -212,12 +222,18 @@ fn una_ronda(
     let reg = registro.lock().unwrap();
     let progreso = reg.progreso().unwrap_or_default();
     let prox = reg.proximo_reintento(None).ok().flatten();
-    let estado = |fase: Fase| EventoUi::Estado(EstadoUi::con_progreso(fase, &progreso));
+    // El estado final lleva la hora prevista de la próxima ronda.
+    let estado = |fase: Fase, espera: Option<Duration>| {
+        let mut e = EstadoUi::con_progreso(fase, &progreso);
+        e.detalle.proxima = espera.map(|d| motor::ahora() + d.as_secs() as i64);
+        EventoUi::Estado(e)
+    };
     match r {
         Err(e) => {
             bitacora::escribir(&dir_datos, &format!("ERROR en la ronda: {e:#}"));
-            emitir(estado(Fase::Error(e.to_string())));
-            Some(Duration::from_secs(900))
+            let espera = Some(Duration::from_secs(900));
+            emitir(estado(Fase::Error(e.to_string()), espera));
+            espera
         }
         Ok(r) => {
             bitacora::escribir(&dir_datos, &format!("RONDA {:?}: {} verificadas, {} fallidas", r.fin, r.verificadas, r.fallidas));
@@ -243,8 +259,9 @@ fn una_ronda(
                 }
                 FinRonda::DestinoAusente => Fase::DestinoAusente,
             };
-            emitir(estado(fase));
-            planificador::espera_tras_ronda(&r, prox, motor::ahora(), cfg.intervalo_horas)
+            let espera = planificador::espera_tras_ronda(&r, prox, motor::ahora(), cfg.intervalo_horas);
+            emitir(estado(fase, espera));
+            espera
         }
     }
 }

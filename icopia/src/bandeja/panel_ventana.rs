@@ -1,7 +1,7 @@
 //! Ventana del panel de progreso: sin bordes, esquinas redondeadas, encima de la bandeja,
 //! junto al reloj (como los paneles de Wi-Fi o volumen de Windows 11).
 use crate::bandeja::estado::EstadoUi;
-use crate::bandeja::panel::{vista, Velocimetro};
+use crate::bandeja::panel::{es_nueva_ronda, principal, vista, Principal, Velocimetro};
 use crate::bandeja::panel_gdi::{self, Boton, Lienzo};
 use crate::descarga::BYTES_RECIBIDOS;
 use std::sync::atomic::Ordering;
@@ -18,7 +18,8 @@ use windows_sys::Win32::Graphics::Gdi as gdi;
 /// Lo que el usuario pidió desde el panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Accion {
-    Pausa,
+    /// El botón principal (Pausar, Reanudar, Revisar ahora o Iniciar sesión).
+    Principal(Principal),
     AbrirCarpeta,
 }
 
@@ -28,6 +29,10 @@ pub struct Panel {
     escala: f32,
     oscuro: bool,
     hover: Option<Boton>,
+    /// Botón sobre el que se pulsó (el clic cuenta al soltar sobre el mismo).
+    pulsado: Option<Boton>,
+    /// Última posición del ratón (píxeles a 96 ppp): un clic siempre llega con el ratón dentro.
+    cursor: (f64, f64),
     oculto_en: Option<Instant>,
     velocimetro: Velocimetro,
     ultima_muestra: Option<Instant>,
@@ -58,6 +63,8 @@ impl Panel {
             escala: 1.0,
             oscuro: false,
             hover: None,
+            pulsado: None,
+            cursor: (-1.0, -1.0),
             oculto_en: None,
             velocimetro: Velocimetro::default(),
             ultima_muestra: None,
@@ -81,6 +88,15 @@ impl Panel {
         }
         self.ultima_muestra = Some(ahora);
         self.velocimetro.registrar(ahora.duration_since(self.t0).as_secs_f64(), BYTES_RECIBIDOS.load(Ordering::Relaxed));
+    }
+
+    /// Llega un estado nuevo del motor: al empezar una ronda, la velocidad se mide de cero.
+    pub fn cambio_de_estado(&mut self, antes: &EstadoUi, despues: &EstadoUi) {
+        if es_nueva_ronda(antes, despues) {
+            self.velocimetro.reiniciar();
+            self.ultima_muestra = None;
+            self.muestrear();
+        }
     }
 
     /// Clic en el icono de la bandeja: abre o cierra el panel. `ancla` es un punto del icono.
@@ -180,7 +196,8 @@ impl Panel {
             WindowEvent::Focused(false) => self.ocultar(),
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed && event.logical_key == Key::Escape => self.ocultar(),
             WindowEvent::CursorMoved { position, .. } => {
-                let b = panel_gdi::boton_en(position.x / self.escala as f64, position.y / self.escala as f64);
+                self.cursor = (position.x / self.escala as f64, position.y / self.escala as f64);
+                let b = panel_gdi::boton_en(self.cursor.0, self.cursor.1);
                 if b != self.hover {
                     self.hover = b;
                     self.refrescar(estado);
@@ -190,9 +207,11 @@ impl Panel {
                 self.hover = None;
                 self.refrescar(estado);
             }
+            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => self.pulsado = panel_gdi::boton_en(self.cursor.0, self.cursor.1),
             WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. } => {
-                return self.hover.map(|b| match b {
-                    Boton::Pausa => Accion::Pausa,
+                let suelto = panel_gdi::boton_en(self.cursor.0, self.cursor.1);
+                return self.pulsado.take().filter(|&b| Some(b) == suelto).map(|b| match b {
+                    Boton::Pausa => Accion::Principal(principal(estado)),
                     Boton::Carpeta => Accion::AbrirCarpeta,
                 });
             }

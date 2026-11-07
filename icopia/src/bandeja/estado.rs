@@ -33,6 +33,19 @@ pub struct Detalle {
     pub ultimo_listado: Option<i64>,
     /// Archivo que se está copiando ahora.
     pub actual: Option<String>,
+    /// Trabajo de la ronda en curso (desde que acabó el listado).
+    pub ronda: Option<Ronda>,
+    /// Cuándo está prevista la próxima ronda (unix), si se sabe.
+    pub proxima: Option<i64>,
+}
+
+/// Lo que tiene que copiar la ronda actual, para medir su avance aparte del total.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Ronda {
+    pub archivos: u64,
+    pub bytes: u64,
+    /// Bytes verificados de toda la fototeca al empezar a copiar.
+    pub bytes_base: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -78,8 +91,26 @@ impl EstadoUi {
                 con_error: p.con_error,
                 ultimo_listado: p.ultimo_listado,
                 actual: None,
+                ronda: None,
+                proxima: None,
             },
         }
+    }
+
+    /// Recalcula los totales con una lectura fresca del registro (sin tocar fase ni ronda).
+    pub fn actualizar_progreso(&mut self, p: &Progreso) {
+        self.verificadas = p.verificadas;
+        self.total = p.partes;
+        let d = &mut self.detalle;
+        d.bytes_verificados = p.bytes_verificados;
+        d.bytes_total = p.bytes_total;
+        d.con_error = p.con_error;
+        d.ultimo_listado = p.ultimo_listado;
+    }
+
+    /// Hay una ronda en marcha (listando, copiando o verificando).
+    pub fn trabajando(&self) -> bool {
+        matches!(self.fase, Fase::Listando { .. } | Fase::Copiando { .. } | Fase::Verificando { .. })
     }
 
     /// Porcentaje copiado y verificado (por bytes si se conocen; si no, por archivos).

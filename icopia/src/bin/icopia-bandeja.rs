@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 use anyhow::Context;
 use icopia::bandeja::estado::{EstadoUi, EventoUi, Fase};
+use icopia::bandeja::panel::Principal;
 use icopia::bandeja::panel_ventana::{Accion, Panel};
 use icopia::bandeja::hilo_motor::{self, Orden};
 use icopia::bandeja::{autoarranque, avisos, icono};
@@ -19,6 +20,32 @@ use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, 
 enum Ev {
     Ui(EventoUi),
     Bandeja(TrayIconEvent),
+    /// Lectura fresca del registro mientras el panel está abierto.
+    Progreso(icopia::registro::Progreso),
+}
+
+/// Mientras el panel está abierto, relee el registro cada segundo (solo lectura, en su hilo)
+/// para que los totales nunca sean un dato viejo.
+fn sondear_registro(abierto: Arc<AtomicBool>, proxy: tao::event_loop::EventLoopProxy<Ev>) {
+    std::thread::spawn(move || {
+        let mut abierta: Option<(std::path::PathBuf, icopia::registro::Registro)> = None;
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+            if !abierto.load(Ordering::Relaxed) {
+                abierta = None;
+                continue;
+            }
+            let Some(ruta) = Config::cargar().ok().and_then(|c| c.destino).map(|d| d.join(".icopia").join("registro.db")) else { continue };
+            if abierta.as_ref().is_none_or(|(r, _)| *r != ruta) {
+                abierta = ruta.exists().then(|| icopia::registro::Registro::abrir_lectura(&ruta).ok().map(|reg| (ruta, reg))).flatten();
+            }
+            if let Some(p) = abierta.as_ref().and_then(|(_, reg)| reg.progreso().ok()) {
+                if proxy.send_event(Ev::Progreso(p)).is_err() {
+                    return;
+                }
+            }
+        }
+    });
 }
 
 fn instancia_unica() -> bool {
@@ -89,6 +116,8 @@ fn main() {
     let event_loop = EventLoopBuilder::<Ev>::with_user_event().build();
     let proxy = Mutex::new(event_loop.create_proxy());
     let proxy_bandeja = Mutex::new(event_loop.create_proxy());
+    let panel_abierto = Arc::new(AtomicBool::new(false));
+    sondear_registro(panel_abierto.clone(), event_loop.create_proxy());
     TrayIconEvent::set_event_handler(Some(move |e| {
         let _ = proxy_bandeja.lock().unwrap().send_event(Ev::Bandeja(e));
     }));
@@ -106,7 +135,10 @@ fn main() {
             let _ = proxy.lock().unwrap().send_event(Ev::Ui(e));
         }),
     );
-    if cfg.apple_id.is_none() {
+    // Sin Apple ID se pide iniciar sesión ya. Con uno, la primera ronda del motor (en su hilo)
+    // comprueba la sesión y, si caducó, se abre la ventana desde el bucle (una vez por caducidad).
+    let mut login_abierto = cfg.apple_id.is_none();
+    if login_abierto {
         lanzar_login(&tx, &cancelar, false);
     }
 
@@ -188,8 +220,21 @@ fn main() {
                         let _ = tr.set_icon(Some(icono_de(e.color())));
                     }
                 }
+                match e.fase {
+                    Fase::SesionCaducada if !login_abierto => {
+                        login_abierto = true;
+                        lanzar_login(&tx, &cancelar, pausado);
+                    }
+                    // Solo listando o copiando hay prueba de que la sesión vuelve a valer.
+                    Fase::Listando { .. } | Fase::Copiando { .. } => login_abierto = false,
+                    _ => {}
+                }
+                if let Some(p) = panel.as_mut() {
+                    p.cambio_de_estado(&estado, &e);
+                }
                 estado = e;
             }
+            Event::UserEvent(Ev::Progreso(p)) => estado.actualizar_progreso(&p),
             Event::UserEvent(Ev::Ui(EventoUi::Aviso { titulo, texto })) => avisos::mostrar(&titulo, &texto),
             Event::UserEvent(Ev::Bandeja(TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, rect, .. })) => {
                 if let Some(p) = panel.as_mut() {
@@ -200,9 +245,22 @@ fn main() {
             Event::WindowEvent { window_id, event, .. } if panel.as_ref().is_some_and(|p| p.id() == window_id) => {
                 let p = panel.as_mut().expect("panel");
                 match p.evento(&event, &estado) {
-                    Some(Accion::Pausa) => {
-                        alternar_pausa(&mut pausado, &i_pausa);
+                    Some(Accion::Principal(accion @ (Principal::Pausar | Principal::Reanudar))) => {
+                        if pausado == (accion == Principal::Reanudar) {
+                            alternar_pausa(&mut pausado, &i_pausa);
+                        } else if accion == Principal::Reanudar {
+                            let _ = tx.send(Orden::Reanudar);
+                        }
                         p.refrescar(&estado);
+                    }
+                    Some(Accion::Principal(Principal::RevisarAhora)) => {
+                        pausado = false;
+                        i_pausa.set_text("Pausar");
+                        let _ = tx.send(Orden::CopiarAhora);
+                    }
+                    Some(Accion::Principal(Principal::IniciarSesion)) => {
+                        p.ocultar();
+                        lanzar_login(&tx, &cancelar, pausado);
                     }
                     Some(Accion::AbrirCarpeta) => {
                         p.ocultar();
@@ -222,6 +280,7 @@ fn main() {
             _ => {}
         }
         if let Some(p) = panel.as_mut() {
+            panel_abierto.store(p.visible(), Ordering::Relaxed);
             p.muestrear();
             if p.visible() {
                 let cada = p.intervalo(&estado);

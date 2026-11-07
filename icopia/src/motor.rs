@@ -99,7 +99,7 @@ pub fn listar_en_registro(
             return false;
         }
         vistos += 1;
-        if vistos % 200 == 0 {
+        if vistos % 25 == 0 {
             avance(Avance::Listando { vistos });
         }
         true

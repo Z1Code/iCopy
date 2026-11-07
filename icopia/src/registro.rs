@@ -2,7 +2,7 @@
 use crate::layout;
 use crate::modelo::{AssetIcloud, TipoParte, BIBLIOTECA_PERSONAL};
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use std::path::Path;
 use std::time::Duration;
 
@@ -167,6 +167,14 @@ impl Registro {
         con.query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()))?;
         con.execute_batch("PRAGMA synchronous=FULL;")?;
         Self::con_esquema(con)
+    }
+
+    /// Solo lectura y sin tocar el esquema: para consultar mientras el motor escribe (WAL).
+    pub fn abrir_lectura(ruta: &Path) -> Result<Registro> {
+        let con = Connection::open_with_flags(ruta, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
+            .with_context(|| format!("abriendo {}", ruta.display()))?;
+        con.busy_timeout(Duration::from_secs(1))?;
+        Ok(Registro { con })
     }
 
     pub fn en_memoria() -> Result<Registro> {
