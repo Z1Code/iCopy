@@ -8,6 +8,7 @@ pub mod energia;
 pub mod fuente;
 pub mod layout;
 pub mod modelo;
+pub mod motor;
 pub mod puente;
 pub mod registro;
 pub mod verificar;
