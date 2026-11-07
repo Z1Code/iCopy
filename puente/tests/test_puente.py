@@ -334,3 +334,23 @@ def test_borrar_sesion_caducada_en_medio_responde_parcial(salida):
     assert lineas(salida) == [{"ok": True, "borrados": ["A1"],
                                "fallidos": [{"id": "A2", "error": "sesion_caducada"},
                                             {"id": "A3", "error": "sesion_caducada"}]}]
+
+
+def test_listar_incluye_ocultas_sin_duplicar(salida):
+    class Lib:
+        def __init__(self, todas, ocultas=None):
+            self.all = todas
+            if ocultas is not None:
+                self.hidden = ocultas
+
+    def a(i):
+        return AssetFalso(id=i, versiones={AssetVersionSize.ORIGINAL: V(1, "u", "public.heic")})
+
+    p = pi.Puente("yo@x.com", "c", fabrica=lambda _pw: ApiFalsa())
+    p.bibliotecas = lambda: [("PrimarySync", Lib([a("A1")], [a("H1"), a("A1")])),
+                             ("SharedSync-1", Lib([a("S1")]))]
+    p.manejar({"cmd": "listar"})
+    ls = lineas(salida)
+    assert [l["asset"]["id"] for l in ls if "asset" in l] == ["A1", "H1", "S1"]
+    assert ls[-1] == {"ok": True, "total": 3, "omitidos": 0}
+    assert p.cache["H1"][0] == "PrimarySync"

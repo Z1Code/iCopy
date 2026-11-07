@@ -246,25 +246,44 @@ class Puente:
         else:
             responder({"ok": False, "error": "otro", "detalle": f"comando desconocido: {cmd}"})
 
+    def _recorrer(self) -> Any:
+        """Todos los assets de cada biblioteca, incluido el álbum de ocultas, sin repetir ids."""
+        vistos = set()
+        for nombre, lib in self.bibliotecas():
+            albumes = [lib.all]
+            ocultas = getattr(lib, "hidden", None)
+            if ocultas is not None:
+                albumes.append(ocultas)
+            for album in albumes:
+                for asset in album:
+                    try:
+                        i = asset.id
+                    except Exception:  # noqa: BLE001 - lo trata asset_a_json
+                        i = None
+                    if i is not None:
+                        if i in vistos:
+                            continue
+                        vistos.add(i)
+                    yield nombre, lib, asset
+
     def listar(self) -> None:
         self.cache = {}
         total = 0
         omitidos = 0
-        for nombre, lib in self.bibliotecas():
-            for asset in lib.all:
-                try:
-                    j = asset_a_json(asset, nombre)
-                except Exception as e:  # un asset raro no debe tumbar el listado
-                    omitidos += 1
-                    logging.exception("asset omitido")
-                    responder({"aviso": f"asset {getattr(asset, 'id', '?')} omitido: {e}"})
-                    continue
-                if j is None:
-                    omitidos += 1
-                    continue
-                self.cache[asset.id] = (nombre, lib, asset)
-                total += 1
-                responder({"asset": j})
+        for nombre, lib, asset in self._recorrer():
+            try:
+                j = asset_a_json(asset, nombre)
+            except Exception as e:  # un asset raro no debe tumbar el listado
+                omitidos += 1
+                logging.exception("asset omitido")
+                responder({"aviso": f"asset {getattr(asset, 'id', '?')} omitido: {e}"})
+                continue
+            if j is None:
+                omitidos += 1
+                continue
+            self.cache[asset.id] = (nombre, lib, asset)
+            total += 1
+            responder({"asset": j})
         responder({"ok": True, "total": total, "omitidos": omitidos})
 
     def borrar(self, ids: List[str]) -> None:
