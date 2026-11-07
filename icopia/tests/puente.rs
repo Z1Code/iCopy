@@ -37,6 +37,23 @@ fn borrar_reporta_fallidos() {
 }
 
 #[test]
+fn refrescar_emite_assets_y_faltan() {
+    let mut p = falso(&[]);
+    let mut vistos = vec![];
+    let faltan = p.refrescar(&["A1".into(), "BORRADO".into()], &mut |a| { vistos.push(a.id); true }).unwrap();
+    assert_eq!(vistos, vec!["A1"]);
+    assert_eq!(faltan, vec!["BORRADO"]);
+    // El puente sigue atendiendo después.
+    assert_eq!(p.listar(&mut |_| true), Ok(2));
+}
+
+#[test]
+fn refrescar_con_sesion_caducada() {
+    let mut p = falso(&["--caducada"]);
+    assert_eq!(p.refrescar(&["A1".into()], &mut |_| true), Err(ErrorFuente::SesionCaducada));
+}
+
+#[test]
 fn sesion_caducada() {
     let mut p = falso(&["--caducada"]);
     assert_eq!(p.sesion(), Err(ErrorFuente::SesionCaducada));

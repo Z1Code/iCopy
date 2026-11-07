@@ -137,6 +137,24 @@ ON CONFLICT(asset_id, tipo) DO UPDATE SET
 
 const EN_ULTIMA_LISTA: &str = "a.visto_en_lista = CAST((SELECT valor FROM meta WHERE clave = 'marca_lista') AS INTEGER)";
 
+const COLUMNAS_TRABAJO: &str =
+    "p.asset_id, p.tipo, a.nombre_base, a.fecha, p.extension, p.tamano, p.url, p.ruta, p.sha_pendiente, p.checksum_apple";
+
+fn trabajo_de_fila(r: &rusqlite::Row) -> rusqlite::Result<TrabajoParte> {
+    Ok(TrabajoParte {
+        asset_id: r.get(0)?,
+        tipo: tipo_de(r.get(1)?),
+        nombre_base: r.get(2)?,
+        fecha: r.get(3)?,
+        extension: r.get(4)?,
+        tamano: r.get::<_, i64>(5)? as u64,
+        url: r.get(6)?,
+        ruta: r.get(7)?,
+        sha_pendiente: r.get(8)?,
+        checksum: r.get(9)?,
+    })
+}
+
 /// (estado, segundos de espera) tras `intentos` fallos consecutivos.
 pub fn espera_reintento(intentos: u32) -> (&'static str, i64) {
     const ESPERAS: [i64; 9] = [5, 30, 120, 300, 600, 1200, 1800, 3600, 3600];
@@ -234,28 +252,44 @@ impl Registro {
     /// Partes por copiar de assets presentes en el último listado, de la más antigua a la más nueva.
     pub fn partes_pendientes(&self, ahora: i64, mes: Option<&str>) -> Result<Vec<TrabajoParte>> {
         let sql = format!(
-            "SELECT p.asset_id, p.tipo, a.nombre_base, a.fecha, p.extension, p.tamano, p.url, p.ruta, p.sha_pendiente, p.checksum_apple
+            "SELECT {COLUMNAS_TRABAJO}
              FROM partes p JOIN assets a ON a.id = p.asset_id
              WHERE p.estado <> 'verificado' AND p.proximo_intento <= ?1 AND a.borrado_icloud IS NULL
                AND {EN_ULTIMA_LISTA} AND (?2 IS NULL OR a.mes = ?2)
              ORDER BY a.fecha_unix, p.asset_id, CASE p.tipo WHEN 'original' THEN 0 WHEN 'live' THEN 1 WHEN 'alternativa' THEN 2 ELSE 3 END"
         );
         let mut st = self.con.prepare(&sql)?;
-        let filas = st.query_map(params![ahora, mes], |r| {
-            Ok(TrabajoParte {
-                asset_id: r.get(0)?,
-                tipo: tipo_de(r.get(1)?),
-                nombre_base: r.get(2)?,
-                fecha: r.get(3)?,
-                extension: r.get(4)?,
-                tamano: r.get::<_, i64>(5)? as u64,
-                url: r.get(6)?,
-                ruta: r.get(7)?,
-                sha_pendiente: r.get(8)?,
-                checksum: r.get(9)?,
-            })
-        })?;
+        let filas = st.query_map(params![ahora, mes], trabajo_de_fila)?;
         Ok(filas.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Partes aún sin verificar de un asset, tal como están ahora en el registro.
+    pub fn trabajos_de(&self, asset_id: &str) -> Result<Vec<TrabajoParte>> {
+        let sql = format!(
+            "SELECT {COLUMNAS_TRABAJO} FROM partes p JOIN assets a ON a.id = p.asset_id
+             WHERE p.asset_id = ?1 AND p.estado <> 'verificado'"
+        );
+        let mut st = self.con.prepare(&sql)?;
+        let filas = st.query_map(params![asset_id], trabajo_de_fila)?;
+        Ok(filas.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Enlaces renovados sin listar: actualiza las partes que ya existen de un asset ya registrado
+    /// (url, tamaño, checksum, extensión; perdona los fallos por enlace caducado). No toca la marca
+    /// del listado (`visto_en_lista`) ni crea assets o partes nuevos: eso es cosa del listado completo.
+    pub fn actualizar_enlaces(&mut self, a: &AssetIcloud) -> Result<()> {
+        let tx = self.con.transaction()?;
+        for p in &a.partes {
+            let existe = tx
+                .query_row("SELECT 1 FROM partes WHERE asset_id = ?1 AND tipo = ?2", params![a.id, p.tipo.como_str()], |_| Ok(()))
+                .optional()?
+                .is_some();
+            if existe {
+                tx.execute(UPSERT_PARTE, params![a.id, p.tipo.como_str(), p.extension, p.tamano as i64, p.checksum, p.url])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn proximo_reintento(&self, mes: Option<&str>) -> Result<Option<i64>> {
@@ -621,6 +655,30 @@ mod tests {
         // Sin penalización acumulada: el siguiente fallo vuelve a esperar solo 5 s.
         r.registrar_fallo("A1", Original, "corte", 1000).unwrap();
         assert_eq!(r.partes_pendientes(1005, None).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn actualizar_enlaces_no_cambia_la_marca_ni_crea_nada() {
+        let mut r = Registro::en_memoria().unwrap();
+        let a = asset("A1", "PrimarySync", "2026-08-10T19:37:18-04:00", &[(Original, 10)]);
+        listar(&mut r, &[a.clone()], 1000);
+        r.registrar_fallo("A1", Original, "enlace de descarga caducado (HTTP 410)", 1000).unwrap();
+        let mut nuevo = a.clone();
+        nuevo.partes[0].url = "http://x/nuevo?e=99".into();
+        // Una parte nueva o un asset desconocido no se registran aquí (solo el listado completo).
+        nuevo.partes.push(ParteIcloud { tipo: Live, tamano: 5, url: "u".into(), extension: "MOV".into(), checksum: "c".into() });
+        r.actualizar_enlaces(&nuevo).unwrap();
+        let mut otro = asset("B1", "PrimarySync", "2026-08-10T19:37:18-04:00", &[(Original, 10)]);
+        otro.partes[0].url = "http://x/b".into();
+        r.actualizar_enlaces(&otro).unwrap();
+        assert_eq!(r.assets_ultimo_listado().unwrap(), Some(1), "la marca sigue siendo la del listado");
+        let p = r.partes_pendientes(1000, None).unwrap();
+        assert_eq!(p.len(), 1, "el fallo por enlace caducado se perdona y no aparecen partes nuevas");
+        assert_eq!(p[0].url, "http://x/nuevo?e=99");
+        assert_eq!(r.trabajos_de("A1").unwrap(), p);
+        assert!(r.trabajos_de("B1").unwrap().is_empty());
+        let visto: i64 = r.con.query_row("SELECT visto_en_lista FROM assets WHERE id = 'A1'", [], |f| f.get(0)).unwrap();
+        assert_eq!(visto, 1000);
     }
 
     #[test]

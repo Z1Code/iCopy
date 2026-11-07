@@ -194,6 +194,8 @@ fn una_ronda(
         let (fase, actual, ultimo) = match a {
             Avance::Listando { vistos } => (Fase::Listando { vistos }, None, false),
             Avance::Copiando { hechas, total, actual } => (Fase::Copiando { hechas, total }, Some(actual), hechas == total),
+            // Breve, sin relistar: se muestra siempre (no se descarta por el límite de avisos por segundo).
+            Avance::RenovandoEnlaces { n, hechas, total } => (Fase::Copiando { hechas, total }, Some(format!("Renovando enlaces ({n})…")), true),
         };
         let mut r = ritmo.lock().unwrap();
         if let (Fase::Copiando { total, .. }, None) = (&fase, &r.3) {
@@ -247,7 +249,8 @@ fn una_ronda(
         }
         Ok(r) => {
             bitacora::escribir(&dir_datos, &format!("RONDA {:?}: {} verificadas, {} fallidas, {} aplazadas", r.fin, r.verificadas, r.fallidas, r.aplazadas));
-            *renovar = r.aplazadas > 0;
+            // Solo si se aplazaron archivos para relistar (no los que ya no estaban al renovar enlaces).
+            *renovar = r.fin == FinRonda::Relistar && r.aplazadas > 0;
             if r.verificadas > 0 {
                 aviso(emitir, format!("{} archivos nuevos copiados y verificados", r.verificadas));
             }

@@ -36,5 +36,12 @@ for linea in sys.stdin:
         ids = p["ids"]
         out({"ok": True, "borrados": [i for i in ids if i != "MALO"],
              "fallidos": [{"id": "MALO", "error": "reintentar"}] if "MALO" in ids else []})
+    elif c == "refrescar":
+        ids = p["ids"]
+        for i in ids:
+            if i.startswith("A"):
+                out({"asset": asset(i)})
+        out({"ok": True, "total": sum(1 for i in ids if i.startswith("A")),
+             "faltan": [i for i in ids if not i.startswith("A")]})
     else:
-        out({"ok": False, "error": "otro", "detalle": "?"})
+        out({"ok": False, "error": "otro", "detalle": "comando desconocido: " + str(c)})

@@ -7,7 +7,8 @@ use crate::layout;
 use crate::registro::{Registro, TrabajoParte};
 use crate::verificar::{self, FalloVerificacion};
 use reqwest::blocking::Client;
-use std::collections::VecDeque;
+use crate::modelo::TipoParte;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -37,6 +38,8 @@ pub struct ResultadoRonda {
 pub enum Avance {
     Listando { vistos: usize },
     Copiando { hechas: usize, total: usize, actual: String },
+    /// Se están pidiendo enlaces nuevos para los próximos `n` assets (sin relistar).
+    RenovandoEnlaces { n: usize, hechas: usize, total: usize },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -87,6 +90,33 @@ const MARGEN_CADUCIDAD: i64 = 120;
 const RITMO_PRUDENTE: u64 = 2 * 1024 * 1024;
 /// Un rechazo (401/403/404/410) con un listado más reciente que esto es un fallo real del asset.
 pub const LISTADO_RECIENTE: i64 = 600;
+/// Partes cuyos enlaces se renuevan de una vez (las próximas de la cola que van a caducar).
+pub const LOTE_RENOVAR: usize = 200;
+/// Con el enlace de una parte se renuevan también los de la cola que caducan en este plazo.
+const HORIZONTE_RENOVAR: i64 = 600;
+/// Veces que una misma parte puede pedir enlace nuevo en una ronda (descargas muy largas).
+const MAX_RENOVACIONES_PARTE: u32 = 5;
+
+/// Resultado de pedir un enlace nuevo para una parte.
+#[allow(clippy::large_enum_variant)]
+enum Renovado {
+    Nuevo(TrabajoParte),
+    /// Ya no está en iCloud (o el puente no la conoce): sigue pendiente hasta el próximo listado.
+    Falta,
+    /// No se pudo renovar (puente sin `refrescar`, error...): se vuelve a relistar como antes.
+    NoDisponible,
+}
+
+/// Lo compartido entre los hilos para renovar enlaces sin relistar.
+struct Renovador<'a> {
+    /// Un solo hilo renueva a la vez (el puente atiende una petición cada vez).
+    fuente: Mutex<&'a mut dyn FuenteIcloud>,
+    roto: AtomicBool,
+    /// Por parte: cuándo se renovó su enlace (para juzgar sus rechazos) y cuántas veces lo pidió ella.
+    renovadas: Mutex<HashMap<(String, TipoParte), (i64, u32)>>,
+    lotes: AtomicUsize,
+    enlaces: AtomicUsize,
+}
 
 /// Caducidad (unix) del enlace de iCloud: parámetro `e` de la query. `None` si no lo trae.
 pub fn caducidad_url(url: &str) -> Option<i64> {
@@ -180,9 +210,18 @@ pub fn ejecutar_ronda(
     let fallidas = AtomicUsize::new(0);
     let aplazadas = AtomicUsize::new(0);
     let relistar = AtomicBool::new(false);
-    // Un enlace caducó a media descarga: lo que queda en la cola espera al próximo listado.
+    // Un enlace caducó a media descarga y no se pudo renovar: lo que queda en la cola espera al próximo listado.
     let parar = AtomicBool::new(false);
     let sin_espacio = AtomicBool::new(false);
+    let renovador = Renovador {
+        fuente: Mutex::new(fuente),
+        roto: AtomicBool::new(false),
+        renovadas: Mutex::new(HashMap::new()),
+        lotes: AtomicUsize::new(0),
+        enlaces: AtomicUsize::new(0),
+    };
+    let aviso_renovar = |n: usize| avance(Avance::RenovandoEnlaces { n, hechas: hechas.load(Ordering::Relaxed), total });
+    let renovar = |t: &TrabajoParte| renovar_enlaces(&renovador, t, &cola, registro, &dir_datos, cancelar, &aplazadas, &aviso_renovar);
 
     std::thread::scope(|s| {
         for _ in 0..op.concurrencia.max(1) {
@@ -190,14 +229,22 @@ pub fn ejecutar_ronda(
                 if cancelar.load(Ordering::Relaxed) || sin_espacio.load(Ordering::Relaxed) || parar.load(Ordering::Relaxed) {
                     break;
                 }
-                let Some(t) = cola.lock().unwrap().pop_front() else { break };
-                // Enlace a punto de caducar: no se descarga ni cuenta como fallo; queda pendiente
-                // y se sigue con los demás (los que aún valen se aprovechan antes de relistar).
+                let Some(mut t) = cola.lock().unwrap().pop_front() else { break };
+                // Enlace a punto de caducar: se piden enlaces nuevos para este y los próximos de la
+                // cola, sin relistar. Si no se puede, no se descarga ni cuenta como fallo: queda
+                // pendiente y se sigue con los demás (los que aún valen se aprovechan antes de relistar).
                 if fiar_de_e && caduca_pronto(&t.url, t.tamano, ahora()) {
-                    aplazadas.fetch_add(1, Ordering::Relaxed);
-                    relistar.store(true, Ordering::Relaxed);
-                    hechas.fetch_add(1, Ordering::Relaxed);
-                    continue;
+                    match renovar(&t) {
+                        Renovado::Nuevo(n) => t = n,
+                        otro => {
+                            if matches!(otro, Renovado::NoDisponible) {
+                                relistar.store(true, Ordering::Relaxed);
+                            }
+                            aplazadas.fetch_add(1, Ordering::Relaxed);
+                            hechas.fetch_add(1, Ordering::Relaxed);
+                            continue;
+                        }
+                    }
                 }
                 if !disco::cabe(destino, t.tamano) {
                     sin_espacio.store(true, Ordering::Relaxed);
@@ -205,6 +252,7 @@ pub fn ejecutar_ronda(
                 }
                 let actual = format!("{} ({})", t.nombre_base, t.tipo.como_str());
                 avance(Avance::Copiando { hechas: hechas.load(Ordering::Relaxed), total, actual: actual.clone() });
+                let renovada = renovador.renovadas.lock().unwrap().get(&(t.asset_id.clone(), t.tipo)).copied();
                 match procesar_parte(destino, registro, http, &t, cancelar) {
                     Ok(sha) => {
                         if let Err(e) = registro.lock().unwrap().marcar_verificada(&t.asset_id, t.tipo, &sha) {
@@ -213,10 +261,25 @@ pub fn ejecutar_ronda(
                         verificadas.fetch_add(1, Ordering::Relaxed);
                     }
                     Err(ErrorParte::Cancelada) => break,
-                    Err(ErrorParte::Descarga(ErrorDescarga::UrlCaducada(_))) if rechazo_por_caducidad(&t.url, fin_listado, ahora(), fiar_de_e) => {
-                        aplazadas.fetch_add(1, Ordering::Relaxed);
-                        relistar.store(true, Ordering::Relaxed);
-                        parar.store(true, Ordering::Relaxed);
+                    Err(ErrorParte::Descarga(ErrorDescarga::UrlCaducada(_)))
+                        if rechazo_por_caducidad(&t.url, renovada.map_or(fin_listado, |r| r.0), ahora(), fiar_de_e) =>
+                    {
+                        // Se pide otro enlace y se reanuda (el `.part` se conserva); si no se puede, se aplaza.
+                        let otro = if renovada.map_or(0, |r| r.1) < MAX_RENOVACIONES_PARTE { renovar(&t) } else { Renovado::Falta };
+                        match otro {
+                            Renovado::Nuevo(n) => {
+                                cola.lock().unwrap().push_front(n);
+                                continue;
+                            }
+                            Renovado::Falta => {
+                                aplazadas.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Renovado::NoDisponible => {
+                                aplazadas.fetch_add(1, Ordering::Relaxed);
+                                relistar.store(true, Ordering::Relaxed);
+                                parar.store(true, Ordering::Relaxed);
+                            }
+                        }
                     }
                     Err(e) => {
                         let msg = match e {
@@ -242,6 +305,10 @@ pub fn ejecutar_ronda(
     if parar.load(Ordering::Relaxed) && !cancelar.load(Ordering::Relaxed) && !sin_espacio.load(Ordering::Relaxed) {
         aplazadas.fetch_add(cola.lock().unwrap().len(), Ordering::Relaxed);
     }
+    let (lotes, enlaces) = (renovador.lotes.load(Ordering::Relaxed), renovador.enlaces.load(Ordering::Relaxed));
+    if lotes > 0 {
+        bitacora::escribir(&dir_datos, &format!("ENLACES RENOVADOS: {enlaces} assets en {lotes} lotes, sin relistar"));
+    }
     let aplazadas = aplazadas.load(Ordering::Relaxed);
     if aplazadas > 0 {
         bitacora::escribir(&dir_datos, &format!("ENLACES CADUCAN: {aplazadas} archivos aplazados hasta el próximo listado"));
@@ -263,6 +330,111 @@ pub fn ejecutar_ronda(
         fallidas: fallidas.load(Ordering::Relaxed),
         aplazadas,
     })
+}
+
+/// Pide enlaces nuevos para `t` (ya sacado de la cola) y para las próximas partes de la cola que
+/// caducan pronto, sin relistar. Actualiza el registro (sin tocar la marca del listado) y la cola.
+/// Las partes de assets que ya no están salen de la cola y cuentan como aplazadas.
+#[allow(clippy::too_many_arguments)]
+fn renovar_enlaces(
+    r: &Renovador,
+    t: &TrabajoParte,
+    cola: &Mutex<VecDeque<TrabajoParte>>,
+    registro: &Mutex<Registro>,
+    dir_datos: &Path,
+    cancelar: &AtomicBool,
+    aplazadas: &AtomicUsize,
+    aviso: &dyn Fn(usize),
+) -> Renovado {
+    if r.roto.load(Ordering::Relaxed) {
+        return Renovado::NoDisponible;
+    }
+    let mut fuente = r.fuente.lock().unwrap();
+    if r.roto.load(Ordering::Relaxed) {
+        return Renovado::NoDisponible;
+    }
+    let inicio = ahora();
+    let mut ids: Vec<String> = vec![t.asset_id.clone()];
+    {
+        let c = cola.lock().unwrap();
+        let mut vistos: HashSet<&str> = HashSet::from([t.asset_id.as_str()]);
+        for j in c.iter().filter(|j| caduca_pronto(&j.url, j.tamano, inicio + HORIZONTE_RENOVAR)).take(LOTE_RENOVAR - 1) {
+            if vistos.insert(j.asset_id.as_str()) {
+                ids.push(j.asset_id.clone());
+            }
+        }
+    }
+    aviso(ids.len());
+    let mut renovados: HashSet<String> = HashSet::new();
+    let mut error_registro: Option<anyhow::Error> = None;
+    let resultado = fuente.refrescar(&ids, &mut |a| {
+        if cancelar.load(Ordering::Relaxed) {
+            return false;
+        }
+        if let Err(e) = registro.lock().unwrap().actualizar_enlaces(&a) {
+            error_registro = Some(e);
+            return false;
+        }
+        renovados.insert(a.id);
+        true
+    });
+    drop(fuente);
+    let fallo = match (&resultado, &error_registro) {
+        (_, Some(e)) => Some(format!("registro: {e:#}")),
+        (Err(e), None) => Some(e.to_string()),
+        // Nada renovado (p. ej. un puente que no conoce el último listado): mejor relistar.
+        (Ok(_), None) if renovados.is_empty() => Some("el puente no devolvió ningún asset".into()),
+        _ => None,
+    };
+    if let Some(m) = fallo {
+        if !cancelar.load(Ordering::Relaxed) {
+            bitacora::escribir(dir_datos, &format!("AVISO: no se pudieron renovar los enlaces ({m}); se volverá a listar"));
+        }
+        r.roto.store(true, Ordering::Relaxed);
+        return Renovado::NoDisponible;
+    }
+    r.lotes.fetch_add(1, Ordering::Relaxed);
+    r.enlaces.fetch_add(renovados.len(), Ordering::Relaxed);
+    let faltan: HashSet<&str> = ids.iter().map(String::as_str).filter(|i| !renovados.contains(*i)).collect();
+    if !faltan.is_empty() {
+        bitacora::escribir(dir_datos, &format!("AVISO: {} assets ya no están en iCloud; esperan al próximo listado", faltan.len()));
+    }
+    // Trabajos frescos desde el registro (url, tamaño, checksum, ruta... ya actualizados).
+    let mut frescos: HashMap<(String, TipoParte), TrabajoParte> = HashMap::new();
+    {
+        let reg = registro.lock().unwrap();
+        for id in &renovados {
+            for j in reg.trabajos_de(id).unwrap_or_default() {
+                frescos.insert((j.asset_id.clone(), j.tipo), j);
+            }
+        }
+    }
+    {
+        let mut renovadas = r.renovadas.lock().unwrap();
+        for clave in frescos.keys() {
+            renovadas.entry(clave.clone()).or_insert((0, 0)).0 = inicio;
+        }
+        if let Some(e) = renovadas.get_mut(&(t.asset_id.clone(), t.tipo)) {
+            e.1 += 1;
+        }
+    }
+    {
+        let mut c = cola.lock().unwrap();
+        let antes = c.len();
+        c.retain(|j| !faltan.contains(j.asset_id.as_str()));
+        aplazadas.fetch_add(antes - c.len(), Ordering::Relaxed);
+        for j in c.iter_mut() {
+            if let Some(n) = frescos.get(&(j.asset_id.clone(), j.tipo)) {
+                *j = n.clone();
+            }
+        }
+    }
+    match frescos.remove(&(t.asset_id.clone(), t.tipo)) {
+        // Recién renovado es lo más fresco que hay: se intenta aunque el archivo sea tan grande que el
+        // enlace pueda caducar antes de terminar (la descarga se reanudaría con otro enlace).
+        Some(n) if caducidad_url(&n.url).is_none_or(|e| e > ahora() + MARGEN_CADUCIDAD) => Renovado::Nuevo(n),
+        _ => Renovado::Falta,
+    }
 }
 
 fn procesar_parte(destino: &Path, registro: &Mutex<Registro>, http: &Client, t: &TrabajoParte, cancelar: &AtomicBool) -> Result<String, ErrorParte> {

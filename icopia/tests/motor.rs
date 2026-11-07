@@ -336,3 +336,138 @@ fn enlace_que_caduca_a_media_ronda_aplaza_el_resto_sin_contar_fallos() {
     assert!(errores(&reg).is_empty());
     assert_eq!(reg.lock().unwrap().partes_pendientes(motor::ahora(), None).unwrap().len(), 3);
 }
+
+fn con_renovacion(assets: Vec<icopia::modelo::AssetIcloud>) -> FuenteFalsa {
+    FuenteFalsa { assets, renovar: true, ..Default::default() }
+}
+
+#[test]
+fn enlaces_que_caducan_a_media_ronda_se_renuevan_sin_relistar() {
+    let a = jpeg(100);
+    let s = servidor(vec![("/a", Comportamiento::Servir(a.clone()))]);
+    let ahora = motor::ahora();
+    let mut assets = vec![asset("A0", "IMG_0000", AGO, "PrimarySync", vec![parte(TipoParte::Original, &a, con_caducidad(s.url("/a"), ahora + 3600), "JPG")])];
+    for i in 1..=5 {
+        assets.push(asset(&format!("A{i}"), &format!("IMG_000{i}"), SEP, "PrimarySync", vec![parte(TipoParte::Original, &a, con_caducidad(s.url("/a"), ahora + 10), "JPG")]));
+    }
+    let mut f = con_renovacion(assets);
+    let d = tempfile::tempdir().unwrap();
+    let reg = nuevo_registro();
+    let avisos = Mutex::new(vec![]);
+    let op = OpcionesRonda { concurrencia: 1, mes: None };
+    let r = motor::ejecutar_ronda(d.path(), &reg, &mut f, &descarga::cliente(), &op, &AtomicBool::new(false), &|a: Avance| {
+        if let Avance::RenovandoEnlaces { n, .. } = a {
+            avisos.lock().unwrap().push(n);
+        }
+    })
+    .unwrap();
+    assert_eq!((r.fin, r.verificadas, r.aplazadas, r.fallidas), (FinRonda::Completa, 6, 0, 0));
+    assert_eq!(f.refrescos, vec![vec!["A1", "A2", "A3", "A4", "A5"]], "un solo lote con todos los que caducan");
+    assert_eq!(*avisos.lock().unwrap(), vec![5], "el panel ve «Renovando enlaces (5)…»");
+    assert_eq!(s.peticiones_a("/a").len(), 6);
+    let r = reg.lock().unwrap();
+    assert_eq!(r.assets_ultimo_listado().unwrap(), Some(6), "renovar no cambia la marca del listado");
+    assert!(r.partes_pendientes(motor::ahora(), None).unwrap().is_empty());
+    drop(r);
+    let log = leer_bitacora(d.path());
+    assert!(log.contains("ENLACES RENOVADOS: 5 assets en 1 lotes"), "{log}");
+    assert!(!log.contains("ENLACES CADUCAN"), "{log}");
+}
+
+#[test]
+fn renovar_con_varios_hilos_completa_la_ronda() {
+    let a = jpeg(100);
+    let s = servidor(vec![("/a", Comportamiento::Servir(a.clone()))]);
+    let ahora = motor::ahora();
+    let mut assets = vec![asset("A0", "IMG_0000", AGO, "PrimarySync", vec![parte(TipoParte::Original, &a, con_caducidad(s.url("/a"), ahora + 3600), "JPG")])];
+    for i in 1..=30 {
+        assets.push(asset(&format!("A{i}"), &format!("IMG_{i:04}"), SEP, "PrimarySync", vec![parte(TipoParte::Original, &a, con_caducidad(s.url("/a"), ahora + 10), "JPG")]));
+    }
+    let mut f = con_renovacion(assets);
+    let d = tempfile::tempdir().unwrap();
+    let reg = nuevo_registro();
+    let r = ronda_con(d.path(), &reg, &mut f, 3, None);
+    assert_eq!((r.fin, r.verificadas, r.aplazadas, r.fallidas), (FinRonda::Completa, 31, 0, 0));
+    assert!(!f.refrescos.is_empty() && f.refrescos.len() <= 3, "{:?}", f.refrescos);
+}
+
+#[test]
+fn si_no_se_puede_renovar_se_relista_como_antes() {
+    let a = jpeg(100);
+    let s = servidor(vec![("/a", Comportamiento::Servir(a.clone()))]);
+    let ahora = motor::ahora();
+    let mut assets = vec![asset("A0", "IMG_0000", AGO, "PrimarySync", vec![parte(TipoParte::Original, &a, con_caducidad(s.url("/a"), ahora + 3600), "JPG")])];
+    for i in 1..=3 {
+        assets.push(asset(&format!("A{i}"), &format!("IMG_000{i}"), SEP, "PrimarySync", vec![parte(TipoParte::Original, &a, con_caducidad(s.url("/a"), ahora + 10), "JPG")]));
+    }
+    // Puente antiguo: `refrescar` falla.
+    let mut f = FuenteFalsa { assets, ..Default::default() };
+    let d = tempfile::tempdir().unwrap();
+    let reg = nuevo_registro();
+    let r = ronda_con(d.path(), &reg, &mut f, 1, None);
+    assert_eq!((r.fin, r.verificadas, r.aplazadas, r.fallidas), (FinRonda::Relistar, 1, 3, 0));
+    assert_eq!(f.refrescos.len(), 1, "tras un fallo no se insiste en la misma ronda");
+    assert!(errores(&reg).is_empty());
+    assert_eq!(reg.lock().unwrap().partes_pendientes(motor::ahora(), None).unwrap().len(), 3);
+    let log = leer_bitacora(d.path());
+    assert!(log.contains("no se pudieron renovar los enlaces"), "{log}");
+}
+
+#[test]
+fn lo_que_falta_al_renovar_queda_pendiente_sin_relistar() {
+    let a = jpeg(100);
+    let s = servidor(vec![("/a", Comportamiento::Servir(a.clone()))]);
+    let ahora = motor::ahora();
+    let mut f = con_renovacion(vec![
+        asset("A0", "IMG_0000", AGO, "PrimarySync", vec![parte(TipoParte::Original, &a, con_caducidad(s.url("/a"), ahora + 3600), "JPG")]),
+        asset("A1", "IMG_0001", SEP, "PrimarySync", vec![
+            parte(TipoParte::Original, &a, con_caducidad(s.url("/a"), ahora + 10), "JPG"),
+            parte(TipoParte::Live, &mov(50), con_caducidad(s.url("/a"), ahora + 10), "MOV"),
+        ]),
+        asset("A2", "IMG_0002", SEP, "PrimarySync", vec![parte(TipoParte::Original, &a, con_caducidad(s.url("/a"), ahora + 10), "JPG")]),
+    ]);
+    f.faltan = vec!["A1".into()];
+    let d = tempfile::tempdir().unwrap();
+    let reg = nuevo_registro();
+    let r = ronda_con(d.path(), &reg, &mut f, 1, None);
+    assert_eq!((r.fin, r.verificadas, r.aplazadas, r.fallidas), (FinRonda::Completa, 2, 2, 0));
+    assert_eq!(f.refrescos, vec![vec!["A1", "A2"]], "las dos partes de A1 salen de la cola de una vez");
+    let p = reg.lock().unwrap().partes_pendientes(motor::ahora(), None).unwrap();
+    assert_eq!(p.iter().map(|t| t.asset_id.as_str()).collect::<Vec<_>>(), vec!["A1", "A1"], "siguen pendientes, sin penalizar");
+    assert!(errores(&reg).is_empty());
+}
+
+#[test]
+fn enlace_rechazado_a_media_descarga_se_renueva_y_se_reanuda() {
+    let a = jpeg(100);
+    let s = servidor(vec![("/g", Comportamiento::EstadoTras { codigo: 410, ms: 3000 }), ("/a", Comportamiento::Servir(a.clone()))]);
+    let ahora = motor::ahora();
+    let lejos = ahora + 3600;
+    let mut f = con_renovacion(vec![
+        // Vale al empezar (122 s > margen de 120 s), pero cuando iCloud responde ya está en el margen.
+        asset("A1", "IMG_0001", AGO, "PrimarySync", vec![parte(TipoParte::Original, &a, con_caducidad(s.url("/g"), ahora + 122), "JPG")]),
+        asset("A2", "IMG_0002", SEP, "PrimarySync", vec![parte(TipoParte::Original, &a, con_caducidad(s.url("/a"), lejos), "JPG")]),
+    ]);
+    f.renovados = vec![asset("A1", "IMG_0001", AGO, "PrimarySync", vec![parte(TipoParte::Original, &a, con_caducidad(s.url("/a"), lejos), "JPG")])];
+    let d = tempfile::tempdir().unwrap();
+    let reg = nuevo_registro();
+    let r = ronda_con(d.path(), &reg, &mut f, 1, None);
+    assert_eq!((r.fin, r.verificadas, r.aplazadas, r.fallidas), (FinRonda::Completa, 2, 0, 0));
+    assert_eq!(f.refrescos, vec![vec!["A1"]]);
+    assert!(errores(&reg).is_empty());
+}
+
+#[test]
+fn enlace_recien_renovado_y_rechazado_es_fallo_real() {
+    let a = jpeg(100);
+    let s = servidor(vec![("/g", Comportamiento::EstadoTras { codigo: 410, ms: 3000 })]);
+    let ahora = motor::ahora();
+    let mut f = con_renovacion(vec![asset("A1", "IMG_0001", AGO, "PrimarySync", vec![parte(TipoParte::Original, &a, con_caducidad(s.url("/g"), ahora + 122), "JPG")])]);
+    let d = tempfile::tempdir().unwrap();
+    let reg = nuevo_registro();
+    let r = ronda_con(d.path(), &reg, &mut f, 1, None);
+    // Primer rechazo: caducidad → enlace nuevo (e lejos). Segundo rechazo con enlace recién pedido: fallo real.
+    assert_eq!((r.fin, r.fallidas, r.aplazadas), (FinRonda::Relistar, 1, 0));
+    assert_eq!(f.refrescos.len(), 1, "no se renueva sin fin");
+    assert_eq!(s.peticiones_a("/g").len(), 2);
+}

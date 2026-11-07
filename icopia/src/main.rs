@@ -219,6 +219,7 @@ fn cmd_copiar(args: &[String]) -> Result<()> {
     let avance = |a: Avance| match a {
         Avance::Listando { vistos } => eprint!("\rRevisando iCloud… {vistos} elementos      "),
         Avance::Copiando { hechas, total, actual } => eprint!("\r[{hechas}/{total}] {actual}                    "),
+        Avance::RenovandoEnlaces { n, hechas, total } => eprint!("\r[{hechas}/{total}] Renovando enlaces ({n})…                    "),
     };
     loop {
         let mut puente = abrir_puente(&cfg)?;

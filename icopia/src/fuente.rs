@@ -30,9 +30,12 @@ pub struct ResultadoBorrado {
     pub fallidos: Vec<(String, String)>,
 }
 
-pub trait FuenteIcloud {
+pub trait FuenteIcloud: Send {
     /// Llama a `en_asset` por cada asset. Si devuelve `false`, se detiene con `Err(Cancelado)`.
     fn listar(&mut self, en_asset: &mut dyn FnMut(AssetIcloud) -> bool) -> Result<usize, ErrorFuente>;
+    /// Vuelve a pedir solo estos ids del último listado (enlaces de descarga nuevos) y llama a
+    /// `en_asset` con cada uno. Devuelve los que ya no están (borrados o no listados).
+    fn refrescar(&mut self, ids: &[String], en_asset: &mut dyn FnMut(AssetIcloud) -> bool) -> Result<Vec<String>, ErrorFuente>;
     /// Borra (manda a "Eliminado recientemente") los ids del último listado.
     fn borrar(&mut self, ids: &[String]) -> Result<ResultadoBorrado, ErrorFuente>;
 }
@@ -44,6 +47,22 @@ pub struct FuenteFalsa {
     pub borrados: Vec<String>,
     pub sesion_caducada: bool,
     pub rechazar: Vec<String>,
+    /// Si es falso, `refrescar` falla (como un puente antiguo sin ese comando).
+    pub renovar: bool,
+    /// Versión que devuelve `refrescar` para estos ids; si no está, el asset de `assets` con `e` renovado.
+    pub renovados: Vec<AssetIcloud>,
+    /// Ids que `refrescar` da por desaparecidos.
+    pub faltan: Vec<String>,
+    /// Ids pedidos en cada llamada a `refrescar`.
+    pub refrescos: Vec<Vec<String>>,
+}
+
+/// Cambia el parámetro `e=` (caducidad) de un enlace.
+pub fn con_caducidad_nueva(url: &str, e: i64) -> String {
+    let (base, query) = url.split_once('?').unwrap_or((url, ""));
+    let mut kv: Vec<String> = query.split('&').filter(|x| !x.is_empty() && !x.starts_with("e=")).map(String::from).collect();
+    kv.push(format!("e={e}"));
+    format!("{base}?{}", kv.join("&"))
 }
 
 impl FuenteIcloud for FuenteFalsa {
@@ -57,6 +76,42 @@ impl FuenteIcloud for FuenteFalsa {
             }
         }
         Ok(self.assets.len())
+    }
+
+    fn refrescar(&mut self, ids: &[String], en_asset: &mut dyn FnMut(AssetIcloud) -> bool) -> Result<Vec<String>, ErrorFuente> {
+        self.refrescos.push(ids.to_vec());
+        if self.sesion_caducada {
+            return Err(ErrorFuente::SesionCaducada);
+        }
+        if !self.renovar {
+            return Err(ErrorFuente::Otro("comando desconocido: refrescar".into()));
+        }
+        let e = chrono::Utc::now().timestamp() + 3600;
+        let mut faltan = vec![];
+        for id in ids {
+            let nuevo = if self.faltan.contains(id) {
+                None
+            } else if let Some(a) = self.renovados.iter().find(|a| &a.id == id) {
+                Some(a.clone())
+            } else {
+                self.assets.iter().find(|a| &a.id == id).map(|a| {
+                    let mut a = a.clone();
+                    for p in &mut a.partes {
+                        p.url = con_caducidad_nueva(&p.url, e);
+                    }
+                    a
+                })
+            };
+            match nuevo {
+                Some(a) => {
+                    if !en_asset(a) {
+                        return Err(ErrorFuente::Cancelado);
+                    }
+                }
+                None => faltan.push(id.clone()),
+            }
+        }
+        Ok(faltan)
     }
 
     fn borrar(&mut self, ids: &[String]) -> Result<ResultadoBorrado, ErrorFuente> {
@@ -109,6 +164,29 @@ mod tests {
         assert_eq!(r.borrados, vec!["A"]);
         assert_eq!(r.fallidos, vec![("B".to_string(), "reintentar".to_string())]);
         assert_eq!(f.assets.len(), 1);
+    }
+
+    #[test]
+    fn falsa_refresca_con_enlace_nuevo_y_faltan() {
+        let mut a = asset("A");
+        a.partes.push(crate::modelo::ParteIcloud {
+            tipo: crate::modelo::TipoParte::Original,
+            tamano: 1,
+            url: "http://x/a?o=1&e=5&v=1".into(),
+            extension: "JPG".into(),
+            checksum: "c".into(),
+        });
+        let mut f = FuenteFalsa { assets: vec![a, asset("B")], faltan: vec!["B".into()], ..Default::default() };
+        assert!(f.refrescar(&["A".into()], &mut |_| true).is_err(), "sin `renovar` falla");
+        f.renovar = true;
+        let mut vistos = vec![];
+        let faltan = f.refrescar(&["A".into(), "B".into(), "Z".into()], &mut |a| { vistos.push(a); true }).unwrap();
+        assert_eq!(faltan, vec!["B", "Z"]);
+        assert_eq!(vistos.len(), 1);
+        let url = &vistos[0].partes[0].url;
+        assert!(url.starts_with("http://x/a?o=1&v=1&e="), "{url}");
+        assert!(crate::motor::caducidad_url(url).unwrap() > 5);
+        assert_eq!(f.refrescos.len(), 2);
     }
 
     #[test]

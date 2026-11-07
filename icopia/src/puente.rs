@@ -134,6 +134,30 @@ impl FuenteIcloud for Puente {
         }
     }
 
+    fn refrescar(&mut self, ids: &[String], en_asset: &mut dyn FnMut(AssetIcloud) -> bool) -> Result<Vec<String>, ErrorFuente> {
+        self.enviar(&json!({"cmd": "refrescar", "ids": ids}))?;
+        loop {
+            let v = self.leer()?;
+            if let Some(a) = v.get("asset") {
+                let asset: AssetIcloud = serde_json::from_value(a.clone())
+                    .map_err(|e| ErrorFuente::Otro(format!("asset inválido del puente: {e}")))?;
+                if !en_asset(asset) {
+                    let _ = self.hijo.kill();
+                    return Err(ErrorFuente::Cancelado);
+                }
+                continue;
+            }
+            if v.get("aviso").is_some() {
+                continue;
+            }
+            comprobar(&v)?;
+            return Ok(v["faltan"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                .unwrap_or_default());
+        }
+    }
+
     fn borrar(&mut self, ids: &[String]) -> Result<ResultadoBorrado, ErrorFuente> {
         self.enviar(&json!({"cmd": "borrar", "ids": ids}))?;
         let v = self.leer()?;
