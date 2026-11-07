@@ -15,11 +15,16 @@ path = "src/main.rs"
 name = "icopia-bandeja"
 path = "src/bin/icopia-bandeja.rs"
 
+[[bin]]
+name = "icopia-login"
+path = "src/bin/icopia-login.rs"
+
 [dependencies]
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "5"
 hex = "0.4"
+native-windows-gui = { version = "1.0.13", default-features = false, features = ["notice"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 rfd = "0.15"
 rpassword = "7"

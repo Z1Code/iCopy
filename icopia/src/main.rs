@@ -4,9 +4,10 @@ use icopia::cerrojo;
 use icopia::config::{self, Config};
 use icopia::descarga;
 use icopia::energia::SinSuspension;
-use icopia::fuente::{ErrorFuente, FuenteIcloud};
+use icopia::fuente::FuenteIcloud;
 use icopia::modelo::BIBLIOTECA_PERSONAL;
 use icopia::liberar;
+use icopia::login::{FlujoLogin, Paso};
 use icopia::motor::{self, Avance, FinRonda, Listado, OpcionesRonda};
 use icopia::puente::Puente;
 use icopia::registro::Registro;
@@ -97,23 +98,24 @@ fn cmd_login() -> Result<()> {
         bail!("Hace falta el Apple ID");
     }
     let password = rpassword::prompt_password("Contraseña (no se guarda): ")?;
-    let mut puente = Puente::iniciar(&apple_id, &config::dir_sesion(), &config::log_puente())?;
-    let requiere_2fa = puente.login(&password).map_err(|e| anyhow!("{e}"))?;
-    if requiere_2fa {
-        let mut fallos = 0;
-        loop {
-            let codigo = preguntar("Código de 6 dígitos que apareció en tu iPhone: ")?;
-            match puente.codigo_2fa(&codigo) {
-                Ok(()) => break,
-                Err(ErrorFuente::Credenciales(_)) if fallos < 2 => {
-                    fallos += 1;
-                    println!("Código incorrecto, prueba otra vez.");
-                }
-                Err(e) => bail!("{e}"),
+    let puente = Puente::iniciar(&apple_id, &config::dir_sesion(), &config::log_puente())?;
+    let mut flujo = FlujoLogin::new(puente);
+    let mut paso = flujo.entrar(&password);
+    while paso == Paso::PideCodigo {
+        let codigo = preguntar("Código de 6 dígitos que apareció en tu iPhone: ")?;
+        paso = match flujo.verificar(&codigo) {
+            Paso::Reintentar(m) => {
+                println!("{m}");
+                Paso::PideCodigo
             }
-        }
+            otro => otro,
+        };
     }
-    puente.sesion().map_err(|e| anyhow!("La sesión no quedó válida: {e}"))?;
+    match paso {
+        Paso::Hecho => {}
+        Paso::Reintentar(m) | Paso::Fallo(m) => bail!("{m}"),
+        Paso::PideCodigo => unreachable!(),
+    }
     cfg.apple_id = Some(apple_id);
     cfg.guardar()?;
     println!("Sesión iniciada. Dura unos 2 meses; icopia te avisará cuando caduque.");

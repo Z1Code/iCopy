@@ -16,3 +16,4 @@ pub mod auditoria;
 pub mod liberar;
 pub mod planificador;
 pub mod bandeja;
+pub mod login;
