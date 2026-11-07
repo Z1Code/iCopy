@@ -159,14 +159,24 @@ def borrar_en_icloud(lib: Any, asset: Any) -> Optional[str]:
         if e.code == "TRY_AGAIN_LATER":
             return "reintentar"
         raise
+    # Solo cuenta como borrado si iCloud confirma explícitamente ESE registro sin error.
+    estado = getattr(respuesta, "status_code", None)
+    if getattr(respuesta, "ok", True) is False or (isinstance(estado, int) and estado >= 400):
+        return "respuesta_desconocida"
     try:
         cuerpo = respuesta.json()
     except ValueError:
-        cuerpo = {}
-    for registro in cuerpo.get("records", []):
-        if "serverErrorCode" in registro:
-            return str(registro["serverErrorCode"])
-    return None
+        return "respuesta_desconocida"
+    registros = cuerpo.get("records") if isinstance(cuerpo, dict) else None
+    if not isinstance(registros, list):
+        return "respuesta_desconocida"
+    nombre = asset._asset_record["recordName"]
+    for registro in registros:
+        if isinstance(registro, dict) and registro.get("recordName") == nombre:
+            if "serverErrorCode" in registro:
+                return str(registro["serverErrorCode"])
+            return None
+    return "respuesta_desconocida"
 
 
 def es_error_de_sesion(e: Exception) -> bool:

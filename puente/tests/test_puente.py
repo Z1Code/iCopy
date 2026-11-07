@@ -234,3 +234,63 @@ def test_datos_desconocidos_no_son_liberables():
         a = AssetFalso(versiones={AssetVersionSize.ORIGINAL: V(100, "u1", "public.heic")},
                        campos=campos, campos_master=master)
         assert pi.asset_a_json(a, "PrimarySync")["liberable"] is False, (campos, master)
+
+
+class Respuesta:
+    def __init__(self, cuerpo, status_code=200, ok=None):
+        self._cuerpo = cuerpo
+        self.status_code = status_code
+        self.ok = (status_code < 400) if ok is None else ok
+
+    def json(self):
+        if isinstance(self._cuerpo, Exception):
+            raise self._cuerpo
+        return self._cuerpo
+
+
+class SesionFalsa:
+    def __init__(self, respuesta):
+        self.respuesta = respuesta
+        self.envios = []
+
+    def post(self, url, data=None, headers=None):
+        self.envios.append(json.loads(data))
+        return self.respuesta
+
+
+class LibFalsa:
+    def __init__(self, respuesta):
+        self.service_endpoint = "https://x"
+        self.params = {"a": "1"}
+        self.zone_id = {"zoneName": "PrimarySync"}
+        self.session = SesionFalsa(respuesta)
+
+
+def _borrar_con(respuesta, id="A1"):
+    lib = LibFalsa(respuesta)
+    return pi.borrar_en_icloud(lib, AssetFalso(id=id)), lib
+
+
+def test_borrar_en_icloud_exito_solo_con_el_registro_pedido():
+    r, lib = _borrar_con(Respuesta({"records": [{"recordName": "A1", "fields": {"isDeleted": {"value": 1}}}]}))
+    assert r is None
+    assert lib.session.envios[0]["operations"][0]["record"]["recordName"] == "A1"
+
+
+def test_borrar_en_icloud_respuestas_dudosas_no_cuentan():
+    casos = [
+        Respuesta({}),                                            # sin registros
+        Respuesta({"records": []}),
+        Respuesta({"records": [{"recordName": "OTRO"}]}),          # otro registro
+        Respuesta(ValueError("no json")),                         # cuerpo ilegible
+        Respuesta({"records": [{"recordName": "A1"}]}, status_code=500),  # HTTP de error
+        Respuesta({"records": [{"recordName": "A1"}]}, ok=False),
+        Respuesta(["no", "es", "dict"]),
+    ]
+    for c in casos:
+        assert _borrar_con(c)[0] == "respuesta_desconocida", c._cuerpo
+
+
+def test_borrar_en_icloud_devuelve_el_error_del_servidor():
+    r, _ = _borrar_con(Respuesta({"records": [{"recordName": "A1", "serverErrorCode": "CONFLICT"}]}))
+    assert r == "CONFLICT"
