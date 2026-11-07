@@ -6,7 +6,8 @@ use icopia::descarga;
 use icopia::energia::SinSuspension;
 use icopia::fuente::{ErrorFuente, FuenteIcloud};
 use icopia::modelo::BIBLIOTECA_PERSONAL;
-use icopia::motor::{self, Avance, FinRonda, OpcionesRonda};
+use icopia::liberar;
+use icopia::motor::{self, Avance, FinRonda, Listado, OpcionesRonda};
 use icopia::puente::Puente;
 use icopia::registro::Registro;
 use std::io::{self, BufRead, Write};
@@ -52,6 +53,7 @@ fn ejecutar(args: &[String]) -> Result<()> {
         Some("copiar") => cmd_copiar(args),
         Some("estado") => cmd_estado(),
         Some("verificar") => cmd_verificar(),
+        Some("liberar") => cmd_liberar(args),
         _ => {
             print!("{AYUDA}");
             Ok(())
@@ -268,5 +270,79 @@ fn cmd_verificar() -> Result<()> {
             println!("  - {ruta}: {m}");
         }
     }
+    Ok(())
+}
+
+fn cmd_liberar(args: &[String]) -> Result<()> {
+    let cfg = Config::cargar()?;
+    let destino = destino_de(&cfg)?;
+    let dias: u32 = match opcion(args, "--dias") {
+        Some(d) => d.parse().context("--dias debe ser un número")?,
+        None => cfg.mantener_dias,
+    };
+    let dir_datos = destino.join(".icopia");
+    let _cerrojo = match cerrojo::intentar(&dir_datos)? {
+        Some(c) => c,
+        None => {
+            println!("Esperando a que termine la copia en curso…");
+            cerrojo::esperar(&dir_datos)?
+        }
+    };
+    let registro = Mutex::new(abrir_registro(&destino)?);
+    let mut puente = abrir_puente(&cfg)?;
+    let cancelar = AtomicBool::new(false);
+    println!("Consultando iCloud para trabajar con datos frescos…");
+    let avance_lista = |a: Avance| {
+        if let Avance::Listando { vistos } = a {
+            eprint!("\r  {vistos} elementos…");
+        }
+    };
+    match motor::listar_en_registro(&registro, &mut puente, &cancelar, &avance_lista)? {
+        Listado::Completo(n) => eprintln!("\r  {n} elementos en iCloud."),
+        Listado::Interrumpido(FinRonda::SesionCaducada, _) => bail!("La sesión de iCloud caducó: ejecuta `icopia login`"),
+        Listado::Interrumpido(..) => bail!("El listado de iCloud no terminó; no se borra nada."),
+    }
+    println!("Re-verificando en disco cada archivo antes de proponer nada…");
+    let plan = liberar::preparar(&destino, &registro, dias, motor::ahora(), &|h, t| {
+        if h % 100 == 0 || h == t {
+            eprint!("\r  {h}/{t}");
+        }
+    })?;
+    eprintln!();
+    println!("\n=== Liberar espacio en iCloud ===");
+    println!("Listos para borrar de iCloud (y del iPhone): {} elementos, {:.1} GB", plan.listos.len(), plan.bytes as f64 / 1e9);
+    if let (Some(a), Some(b)) = (plan.listos.first(), plan.listos.last()) {
+        println!("Fechas: {} → {}", &a.fecha[..10], &b.fecha[..10]);
+    }
+    println!("Se conservan en iCloud los últimos {dias} días y todo lo de la Fototeca Compartida.");
+    if plan.no_verificados > 0 {
+        println!("No incluidos por no estar copiados y verificados del todo: {}", plan.no_verificados);
+    }
+    if !plan.excluidos.is_empty() {
+        println!("EXCLUIDOS por fallar la re-verificación: {}", plan.excluidos.len());
+        for (c, m) in plan.excluidos.iter().take(10) {
+            println!("  - {} ({}): {m}", c.nombre_base, &c.fecha[..10]);
+        }
+    }
+    if plan.listos.is_empty() {
+        println!("Nada que borrar.");
+        return Ok(());
+    }
+    println!("\nLo borrado irá a \"Eliminado recientemente\" (recuperable 30 días). Tus archivos del PC no se tocan.");
+    if preguntar("Escribe BORRAR para confirmar: ")? != "BORRAR" {
+        println!("Cancelado. No se borró nada.");
+        return Ok(());
+    }
+    let r = liberar::ejecutar(&destino, &registro, &mut puente, &plan.listos, &|h, t| eprint!("\r  borrados {h}/{t}"))?;
+    eprintln!();
+    println!("Borrados de iCloud: {}", r.borrados);
+    if !r.fallidos.is_empty() {
+        println!("No se pudieron borrar {} (se reintentará la próxima vez):", r.fallidos.len());
+        for (id, e) in r.fallidos.iter().take(10) {
+            println!("  - {id}: {e}");
+        }
+    }
+    println!("Registro de lo borrado: {}", dir_datos.join("borrados.csv").display());
+    println!("Para liberar el espacio ya: iPhone → Fotos → Eliminado recientemente → Eliminar todo.");
     Ok(())
 }

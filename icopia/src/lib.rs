@@ -13,3 +13,4 @@ pub mod puente;
 pub mod registro;
 pub mod verificar;
 pub mod auditoria;
+pub mod liberar;
