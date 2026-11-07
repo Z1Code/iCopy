@@ -9,6 +9,8 @@ Peticiones:
   {"cmd":"codigo_2fa","codigo":"123456"} -> {"ok":true} | {"ok":false,"error":"codigo_incorrecto"}
   {"cmd":"listar"}                       -> {"asset":{...}}* {"aviso":"..."}* {"ok":true,"total":N,"omitidos":M}
   {"cmd":"borrar","ids":[...]}           -> {"ok":true,"borrados":[...],"fallidos":[{"id":..,"error":..}]}
+  {"cmd":"refrescar","ids":[...]}        -> {"asset":{...}}* {"ok":true,"total":N,"faltan":[...]}
+     (enlaces nuevos para ids del último listado; "faltan": no listados, borrados o sin original)
 Errores: {"ok":false,"error":"sesion_caducada"|"credenciales"|"otro","detalle":"..."}
 """
 from __future__ import annotations
@@ -27,7 +29,7 @@ from pyicloud_ipd.asset_version import ITEM_TYPE_EXTENSIONS, AssetVersion
 from pyicloud_ipd.base import PyiCloudService
 from pyicloud_ipd.exceptions import PyiCloudAPIResponseException, PyiCloudFailedLoginException
 from pyicloud_ipd.item_type import AssetItemType
-from pyicloud_ipd.services.photos import filename_with_fallback
+from pyicloud_ipd.services.photos import PhotoAlbum, PhotoAsset, filename_with_fallback
 from pyicloud_ipd.version_size import AssetVersionSize, LivePhotoVersionSize
 from tzlocal import get_localzone
 
@@ -189,6 +191,39 @@ def borrar_en_icloud(lib: Any, asset: Any) -> Optional[str]:
     return "respuesta_desconocida"
 
 
+# Registros por petición records/lookup (cada asset son dos: CPLAsset y CPLMaster).
+REGISTROS_POR_CONSULTA = 200
+
+
+def claves_deseadas() -> List[str]:
+    """Los mismos campos que pide el listado, para que el JSON salga idéntico."""
+    album = PhotoAlbum({}, None, "", "", "", "")  # type: ignore[arg-type]
+    return list(album._list_query_gen(0, "")["desiredKeys"])
+
+
+def consultar_registros(lib: Any, nombres: List[str]) -> Dict[str, Dict[str, Any]]:
+    """records/lookup de CloudKit: {recordName: registro}. Los que fallan traen 'serverErrorCode'."""
+    url = f"{lib.service_endpoint}/records/lookup?{urllib.parse.urlencode(lib.params)}"
+    datos = json.dumps({
+        "records": [{"recordName": n} for n in nombres],
+        "zoneID": lib.zone_id,
+        "desiredKeys": claves_deseadas(),
+    })
+    respuesta = lib.session.post(url, data=datos, headers={"Content-type": "text/plain"})
+    cuerpo = respuesta.json()
+    registros = cuerpo.get("records") if isinstance(cuerpo, dict) else None
+    if not isinstance(registros, list):
+        raise ValueError(f"respuesta inesperada de records/lookup: {str(cuerpo)[:200]}")
+    return {r["recordName"]: r for r in registros if isinstance(r, dict) and "recordName" in r}
+
+
+def _registro_valido(registro: Optional[Dict[str, Any]]) -> bool:
+    if not isinstance(registro, dict) or "serverErrorCode" in registro or registro.get("deleted"):
+        return False
+    campos = _campos(registro)
+    return not any((campos.get(c) or {}).get("value") for c in ("isDeleted", "isExpunged"))
+
+
 def es_error_de_sesion(e: Exception) -> bool:
     codigo = str(getattr(e, "code", "") or "")
     return codigo in ("401", "421", "AUTHENTICATION_FAILED") or "Authentication required" in str(e)
@@ -258,6 +293,8 @@ class Puente:
             self.listar()
         elif cmd == "borrar":
             self.borrar(list(p.get("ids", [])))
+        elif cmd == "refrescar":
+            self.refrescar([str(i) for i in p.get("ids", [])])
         else:
             responder({"ok": False, "error": "otro", "detalle": f"comando desconocido: {cmd}"})
 
@@ -300,6 +337,45 @@ class Puente:
             total += 1
             responder({"asset": j})
         responder({"ok": True, "total": total, "omitidos": omitidos})
+
+    def refrescar(self, ids: List[str]) -> None:
+        """Enlaces nuevos solo para estos ids (los del último listado), sin volver a listarlo todo."""
+        faltan: List[str] = []
+        total = 0
+        grupos: Dict[int, Tuple[Any, List[Tuple[str, str, Any]]]] = {}
+        for i in dict.fromkeys(ids):
+            entrada = self.cache.get(i)
+            if entrada is None:
+                faltan.append(i)
+                continue
+            biblioteca, lib, asset = entrada
+            grupos.setdefault(id(lib), (lib, []))[1].append((i, biblioteca, asset))
+        por_consulta = REGISTROS_POR_CONSULTA // 2
+        for lib, elementos in grupos.values():
+            for inicio in range(0, len(elementos), por_consulta):
+                lote = elementos[inicio:inicio + por_consulta]
+                nombres: List[str] = []
+                for _, _, viejo in lote:
+                    nombres += [viejo._asset_record["recordName"], viejo._master_record["recordName"]]
+                registros = consultar_registros(lib, list(dict.fromkeys(nombres)))
+                for i, biblioteca, viejo in lote:
+                    reg_asset = registros.get(viejo._asset_record["recordName"])
+                    reg_master = registros.get(viejo._master_record["recordName"])
+                    j = None
+                    if _registro_valido(reg_asset) and _registro_valido(reg_master):
+                        nuevo = PhotoAsset(reg_master, reg_asset)
+                        try:
+                            j = asset_a_json(nuevo, biblioteca)
+                        except Exception:  # noqa: BLE001 - como en listar: no tumba el lote
+                            logging.exception("asset %s no se pudo refrescar", i)
+                    if j is None:
+                        faltan.append(i)
+                        self.cache.pop(i, None)
+                        continue
+                    self.cache[i] = (biblioteca, lib, nuevo)
+                    total += 1
+                    responder({"asset": j})
+        responder({"ok": True, "total": total, "faltan": faltan})
 
     def borrar(self, ids: List[str]) -> None:
         """Responde siempre con lo hecho hasta el momento, aunque algo falle a mitad del lote."""

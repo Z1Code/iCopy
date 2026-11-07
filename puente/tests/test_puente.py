@@ -391,3 +391,133 @@ def test_fecha_agregada_sin_dato_usa_la_de_captura():
     a = SinAgregada(versiones={AssetVersionSize.ORIGINAL: V(1, "u", "public.heic")})
     j = pi.asset_a_json(a, "PrimarySync")
     assert j["fecha_agregada"] == j["fecha"]
+
+
+# --- refrescar: forma de records/lookup observada en la API real (nov 2026) ---
+ZONA = {"zoneName": "PrimarySync", "ownerRecordName": "_abc", "zoneType": "REGULAR_CUSTOM_ZONE"}
+
+
+def _master(nombre, url, tamano=3249419, tipo="public.heic", fichero="SU1HXzM0MjEuSEVJQw=="):
+    return {"recordName": nombre, "recordType": "CPLMaster", "recordChangeTag": "384q", "deleted": False,
+            "pluginFields": {}, "fields": {
+                "itemType": {"value": tipo, "type": "STRING"},
+                "filenameEnc": {"value": fichero, "type": "ENCRYPTED_BYTES"},
+                "resOriginalRes": {"value": {"fileChecksum": "ck" + nombre, "size": tamano, "wrappingKey": "k",
+                                             "referenceChecksum": "r", "downloadURL": url}},
+                "resOriginalFileType": {"value": tipo, "type": "STRING"}}}
+
+
+def _asset(nombre, master, tag="384r", **extra):
+    campos = {"masterRef": {"value": {"recordName": master, "action": "DELETE_SELF", "zoneID": ZONA}, "type": "REFERENCE"},
+              "assetDate": {"value": 1794065900000, "type": "TIMESTAMP"},
+              "addedDate": {"value": 1794065900785, "type": "TIMESTAMP"}}
+    campos.update(extra)
+    return {"recordName": nombre, "recordType": "CPLAsset", "recordChangeTag": tag, "deleted": False,
+            "pluginFields": {}, "fields": campos}
+
+
+class SesionLookup:
+    """Responde a records/lookup con los registros que tenga para cada recordName pedido."""
+
+    def __init__(self, registros):
+        self.registros = registros
+        self.envios = []
+        self.urls = []
+
+    def post(self, url, data=None, headers=None):
+        self.urls.append(url)
+        cuerpo = json.loads(data)
+        self.envios.append(cuerpo)
+        assert len(cuerpo["records"]) <= 200, "la API real rechaza más de 200 registros por petición"
+        recs = [self.registros.get(r["recordName"]) or
+                {"recordName": r["recordName"], "reason": "Record not found", "serverErrorCode": "NOT_FOUND"}
+                for r in cuerpo["records"]]
+        return Respuesta({"records": recs, "syncToken": "tok"})
+
+
+class LibLookup:
+    def __init__(self, registros):
+        self.service_endpoint = "https://p1-ckdatabasews.icloud.com:443/database/1/com.apple.photos.cloud/production/private"
+        self.params = {"dsid": "1", "remapEnums": True}
+        self.zone_id = ZONA
+        self.session = SesionLookup(registros)
+
+
+def _puente_con(n, registros_nuevos):
+    lib = LibLookup(registros_nuevos)
+    p = pi.Puente("a@b.c", "/tmp")
+    for k in range(n):
+        viejo = pi.PhotoAsset(_master(f"M{k}", f"https://c/viejo{k}?e=100"), _asset(f"A{k}", f"M{k}", tag="viejo"))
+        p.cache[f"M{k}"] = ("PrimarySync", lib, viejo)
+    return p, lib
+
+
+def test_refrescar_pide_asset_y_master_y_emite_enlaces_nuevos(salida):
+    nuevos = {"A0": _asset("A0", "M0", tag="nuevo"), "M0": _master("M0", "https://c/nuevo0?e=999")}
+    p, lib = _puente_con(1, nuevos)
+    p.manejar({"cmd": "refrescar", "ids": ["M0"]})
+    out = lineas(salida)
+    assert out[-1] == {"ok": True, "total": 1, "faltan": []}
+    a = out[0]["asset"]
+    assert a["id"] == "M0" and a["nombre_base"] == "IMG_3421"
+    assert a["partes"][0]["url"] == "https://c/nuevo0?e=999"
+    envio = lib.session.envios[0]
+    assert sorted(r["recordName"] for r in envio["records"]) == ["A0", "M0"]
+    assert envio["zoneID"] == ZONA
+    assert "resOriginalRes" in envio["desiredKeys"] and "masterRef" in envio["desiredKeys"]
+    assert lib.session.urls[0].startswith(lib.service_endpoint + "/records/lookup?")
+    assert "dsid=1" in lib.session.urls[0]
+    # La caché queda con el registro fresco (recordChangeTag nuevo, para un borrado posterior).
+    assert p.cache["M0"][2]._asset_record["recordChangeTag"] == "nuevo"
+
+
+def test_refrescar_mismo_json_que_listar_salvo_url(salida):
+    viejo = pi.PhotoAsset(_master("M0", "https://c/v?e=1"), _asset("A0", "M0"))
+    nuevos = {"A0": _asset("A0", "M0"), "M0": _master("M0", "https://c/n?e=2")}
+    p, lib = _puente_con(0, nuevos)
+    p.cache["M0"] = ("PrimarySync", lib, viejo)
+    p.manejar({"cmd": "refrescar", "ids": ["M0"]})
+    antes = pi.asset_a_json(viejo, "PrimarySync")
+    despues = lineas(salida)[0]["asset"]
+    for x in (antes, despues):
+        for parte in x["partes"]:
+            parte.pop("url")
+    assert antes == despues
+
+
+def test_refrescar_no_encontrados_borrados_y_no_listados_faltan(salida):
+    nuevos = {"A0": _asset("A0", "M0"), "M0": _master("M0", "https://c/n0?e=9"),
+              # A1/M1: NOT_FOUND (borrado del todo)
+              "A2": _asset("A2", "M2", isDeleted={"value": 1}), "M2": _master("M2", "https://c/n2?e=9")}
+    p, lib = _puente_con(3, nuevos)
+    p.manejar({"cmd": "refrescar", "ids": ["M0", "M1", "M2", "NO-LISTADO"]})
+    out = lineas(salida)
+    assert [o["asset"]["id"] for o in out[:-1]] == ["M0"]
+    assert out[-1]["total"] == 1
+    assert sorted(out[-1]["faltan"]) == ["M1", "M2", "NO-LISTADO"]
+    assert "M1" not in p.cache and "M2" not in p.cache
+
+
+def test_refrescar_en_lotes_de_200_registros(salida):
+    nuevos = {}
+    for k in range(250):
+        nuevos[f"A{k}"] = _asset(f"A{k}", f"M{k}")
+        nuevos[f"M{k}"] = _master(f"M{k}", f"https://c/n{k}?e=9")
+    p, lib = _puente_con(250, nuevos)
+    p.manejar({"cmd": "refrescar", "ids": [f"M{k}" for k in range(250)]})
+    assert [len(e["records"]) for e in lib.session.envios] == [200, 200, 100]
+    assert lineas(salida)[-1] == {"ok": True, "total": 250, "faltan": []}
+
+
+def test_refrescar_sesion_caducada_es_error_de_sesion(salida, monkeypatch):
+    from pyicloud_ipd.exceptions import PyiCloudAPIResponseException
+
+    p, lib = _puente_con(1, {})
+
+    def falla(*a, **k):
+        raise PyiCloudAPIResponseException("Authentication required for Account.", "421")
+
+    monkeypatch.setattr(lib.session, "post", falla)
+    with pytest.raises(PyiCloudAPIResponseException) as e:
+        p.manejar({"cmd": "refrescar", "ids": ["M0"]})
+    assert pi.es_error_de_sesion(e.value)
