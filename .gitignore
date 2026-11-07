@@ -1,0 +1,6 @@
+icopia/target/
+puente/.venv/
+puente/build/
+puente/dist/
+__pycache__/
+*.pyc
