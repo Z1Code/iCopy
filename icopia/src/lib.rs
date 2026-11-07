@@ -5,3 +5,4 @@ pub mod modelo;
 pub mod puente;
 pub mod layout;
 pub mod verificar;
+pub mod registro;

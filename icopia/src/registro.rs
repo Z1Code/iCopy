@@ -1,0 +1,524 @@
+//! Registro persistente (SQLite en <destino>\.icopia\registro.db).
+use crate::layout;
+use crate::modelo::{AssetIcloud, TipoParte, BIBLIOTECA_PERSONAL};
+use anyhow::{Context, Result};
+use rusqlite::{params, Connection, OptionalExtension};
+use std::path::Path;
+use std::time::Duration;
+
+pub struct Registro {
+    con: Connection,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrabajoParte {
+    pub asset_id: String,
+    pub tipo: TipoParte,
+    pub nombre_base: String,
+    pub fecha: String,
+    pub extension: String,
+    pub tamano: u64,
+    pub url: String,
+    pub ruta: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParteGuardada {
+    pub asset_id: String,
+    pub tipo: TipoParte,
+    pub ruta: String,
+    pub tamano: u64,
+    pub extension: String,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Candidato {
+    pub asset_id: String,
+    pub nombre_base: String,
+    pub fecha: String,
+    pub partes: Vec<ParteGuardada>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Resumen {
+    pub assets: u64,
+    pub assets_completos: u64,
+    pub partes: u64,
+    pub verificadas: u64,
+    pub pendientes: u64,
+    pub con_error: u64,
+    pub bytes_total: u64,
+    pub bytes_verificados: u64,
+    pub borrados_icloud: u64,
+}
+
+const ESQUEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS meta(clave TEXT PRIMARY KEY, valor TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS assets(
+  id TEXT PRIMARY KEY,
+  biblioteca TEXT NOT NULL,
+  nombre_base TEXT NOT NULL,
+  fecha TEXT NOT NULL,
+  fecha_unix INTEGER NOT NULL,
+  mes TEXT NOT NULL,
+  visto_en_lista INTEGER NOT NULL,
+  borrado_icloud TEXT
+);
+CREATE TABLE IF NOT EXISTS partes(
+  asset_id TEXT NOT NULL REFERENCES assets(id),
+  tipo TEXT NOT NULL,
+  extension TEXT NOT NULL,
+  tamano INTEGER NOT NULL,
+  checksum_apple TEXT NOT NULL,
+  url TEXT NOT NULL,
+  ruta TEXT,
+  ruta_clave TEXT UNIQUE,
+  estado TEXT NOT NULL DEFAULT 'pendiente',
+  sha256 TEXT,
+  intentos INTEGER NOT NULL DEFAULT 0,
+  proximo_intento INTEGER NOT NULL DEFAULT 0,
+  ultimo_error TEXT,
+  PRIMARY KEY(asset_id, tipo)
+);
+CREATE INDEX IF NOT EXISTS partes_estado ON partes(estado, proximo_intento);
+"#;
+
+// Un cambio de tamaño o de extensión significa que el archivo en iCloud cambió (p. ej. nueva edición).
+const UPSERT_PARTE: &str = r#"
+INSERT INTO partes(asset_id, tipo, extension, tamano, checksum_apple, url) VALUES(?1, ?2, ?3, ?4, ?5, ?6)
+ON CONFLICT(asset_id, tipo) DO UPDATE SET
+  url = excluded.url,
+  checksum_apple = excluded.checksum_apple,
+  estado = CASE WHEN partes.tamano <> excluded.tamano OR partes.extension <> excluded.extension THEN 'pendiente' ELSE partes.estado END,
+  sha256 = CASE WHEN partes.tamano <> excluded.tamano OR partes.extension <> excluded.extension THEN NULL ELSE partes.sha256 END,
+  intentos = CASE WHEN partes.tamano <> excluded.tamano OR partes.extension <> excluded.extension THEN 0 ELSE partes.intentos END,
+  proximo_intento = CASE WHEN partes.tamano <> excluded.tamano OR partes.extension <> excluded.extension THEN 0 ELSE partes.proximo_intento END,
+  ruta = CASE WHEN partes.extension <> excluded.extension THEN NULL ELSE partes.ruta END,
+  ruta_clave = CASE WHEN partes.extension <> excluded.extension THEN NULL ELSE partes.ruta_clave END,
+  tamano = excluded.tamano,
+  extension = excluded.extension
+"#;
+
+const EN_ULTIMA_LISTA: &str = "a.visto_en_lista = CAST((SELECT valor FROM meta WHERE clave = 'marca_lista') AS INTEGER)";
+
+/// (estado, segundos de espera) tras `intentos` fallos consecutivos.
+pub fn espera_reintento(intentos: u32) -> (&'static str, i64) {
+    const ESPERAS: [i64; 9] = [5, 30, 120, 300, 600, 1200, 1800, 3600, 3600];
+    if intentos >= 10 {
+        ("error", 6 * 3600)
+    } else {
+        ("pendiente", ESPERAS[(intentos.max(1) - 1) as usize])
+    }
+}
+
+fn tipo_de(s: String) -> TipoParte {
+    TipoParte::desde_str(&s).unwrap_or(TipoParte::Original)
+}
+
+impl Registro {
+    pub fn abrir(ruta: &Path) -> Result<Registro> {
+        if let Some(p) = ruta.parent() {
+            std::fs::create_dir_all(p)?;
+        }
+        let con = Connection::open(ruta).with_context(|| format!("abriendo {}", ruta.display()))?;
+        con.busy_timeout(Duration::from_secs(30))?;
+        // journal_mode devuelve una fila: se ejecuta con query_row para no provocar "Execute returned results".
+        con.query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()))?;
+        con.execute_batch("PRAGMA synchronous=FULL;")?;
+        Self::con_esquema(con)
+    }
+
+    pub fn en_memoria() -> Result<Registro> {
+        Self::con_esquema(Connection::open_in_memory()?)
+    }
+
+    fn con_esquema(con: Connection) -> Result<Registro> {
+        con.execute_batch(ESQUEMA)?;
+        Ok(Registro { con })
+    }
+
+    pub fn upsert_asset(&mut self, a: &AssetIcloud, marca: i64) -> Result<()> {
+        let f = layout::fecha(&a.fecha).with_context(|| format!("fecha inválida en {}", a.id))?;
+        let tx = self.con.transaction()?;
+        tx.execute(
+            "INSERT INTO assets(id, biblioteca, nombre_base, fecha, fecha_unix, mes, visto_en_lista) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(id) DO UPDATE SET biblioteca = excluded.biblioteca, nombre_base = excluded.nombre_base,
+               fecha = excluded.fecha, fecha_unix = excluded.fecha_unix, mes = excluded.mes,
+               visto_en_lista = excluded.visto_en_lista, borrado_icloud = NULL",
+            params![a.id, a.biblioteca, a.nombre_base, a.fecha, f.timestamp(), layout::mes_clave(&f), marca],
+        )?;
+        for p in &a.partes {
+            tx.execute(UPSERT_PARTE, params![a.id, p.tipo.como_str(), p.extension, p.tamano as i64, p.checksum, p.url])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn guardar_marca_lista(&mut self, marca: i64) -> Result<()> {
+        self.con.execute(
+            "INSERT INTO meta(clave, valor) VALUES('marca_lista', ?1) ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor",
+            params![marca.to_string()],
+        )?;
+        Ok(())
+    }
+
+    pub fn marca_lista(&self) -> Result<Option<i64>> {
+        let v: Option<String> = self
+            .con
+            .query_row("SELECT valor FROM meta WHERE clave = 'marca_lista'", [], |r| r.get(0))
+            .optional()?;
+        Ok(v.and_then(|s| s.parse().ok()))
+    }
+
+    /// Partes por copiar de assets presentes en el último listado, de la más antigua a la más nueva.
+    pub fn partes_pendientes(&self, ahora: i64, mes: Option<&str>) -> Result<Vec<TrabajoParte>> {
+        let sql = format!(
+            "SELECT p.asset_id, p.tipo, a.nombre_base, a.fecha, p.extension, p.tamano, p.url, p.ruta
+             FROM partes p JOIN assets a ON a.id = p.asset_id
+             WHERE p.estado <> 'verificado' AND p.proximo_intento <= ?1 AND a.borrado_icloud IS NULL
+               AND {EN_ULTIMA_LISTA} AND (?2 IS NULL OR a.mes = ?2)
+             ORDER BY a.fecha_unix, p.asset_id, CASE p.tipo WHEN 'original' THEN 0 WHEN 'live' THEN 1 ELSE 2 END"
+        );
+        let mut st = self.con.prepare(&sql)?;
+        let filas = st.query_map(params![ahora, mes], |r| {
+            Ok(TrabajoParte {
+                asset_id: r.get(0)?,
+                tipo: tipo_de(r.get(1)?),
+                nombre_base: r.get(2)?,
+                fecha: r.get(3)?,
+                extension: r.get(4)?,
+                tamano: r.get::<_, i64>(5)? as u64,
+                url: r.get(6)?,
+                ruta: r.get(7)?,
+            })
+        })?;
+        Ok(filas.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn proximo_reintento(&self, mes: Option<&str>) -> Result<Option<i64>> {
+        let sql = format!(
+            "SELECT MIN(p.proximo_intento) FROM partes p JOIN assets a ON a.id = p.asset_id
+             WHERE p.estado <> 'verificado' AND a.borrado_icloud IS NULL AND {EN_ULTIMA_LISTA}
+               AND (?1 IS NULL OR a.mes = ?1)"
+        );
+        Ok(self.con.query_row(&sql, params![mes], |r| r.get::<_, Option<i64>>(0))?)
+    }
+
+    pub fn reintentar_ya(&mut self) -> Result<()> {
+        self.con.execute("UPDATE partes SET proximo_intento = 0 WHERE estado <> 'verificado'", [])?;
+        Ok(())
+    }
+
+    pub fn ruta_ocupada(&self, clave: &str) -> Result<bool> {
+        Ok(self
+            .con
+            .query_row("SELECT 1 FROM partes WHERE ruta_clave = ?1", params![clave], |_| Ok(()))
+            .optional()?
+            .is_some())
+    }
+
+    pub fn asignar_ruta(&mut self, asset_id: &str, tipo: TipoParte, ruta: &str) -> Result<()> {
+        self.con.execute(
+            "UPDATE partes SET ruta = ?3, ruta_clave = ?4 WHERE asset_id = ?1 AND tipo = ?2",
+            params![asset_id, tipo.como_str(), ruta, ruta.to_lowercase()],
+        )?;
+        Ok(())
+    }
+
+    pub fn marcar_verificada(&mut self, asset_id: &str, tipo: TipoParte, sha256: &str) -> Result<()> {
+        self.con.execute(
+            "UPDATE partes SET estado = 'verificado', sha256 = ?3, intentos = 0, proximo_intento = 0, ultimo_error = NULL
+             WHERE asset_id = ?1 AND tipo = ?2",
+            params![asset_id, tipo.como_str(), sha256],
+        )?;
+        Ok(())
+    }
+
+    pub fn registrar_fallo(&mut self, asset_id: &str, tipo: TipoParte, error: &str, ahora: i64) -> Result<()> {
+        let intentos: i64 = self.con.query_row(
+            "SELECT intentos FROM partes WHERE asset_id = ?1 AND tipo = ?2",
+            params![asset_id, tipo.como_str()],
+            |r| r.get(0),
+        )?;
+        let intentos = intentos + 1;
+        let (estado, espera) = espera_reintento(intentos as u32);
+        self.con.execute(
+            "UPDATE partes SET intentos = ?3, proximo_intento = ?4, ultimo_error = ?5, estado = ?6 WHERE asset_id = ?1 AND tipo = ?2",
+            params![asset_id, tipo.como_str(), intentos, ahora + espera, error, estado],
+        )?;
+        Ok(())
+    }
+
+    pub fn marcar_para_redescarga(&mut self, asset_id: &str, tipo: TipoParte, motivo: &str) -> Result<()> {
+        self.con.execute(
+            "UPDATE partes SET estado = 'pendiente', sha256 = NULL, intentos = 0, proximo_intento = 0, ultimo_error = ?3
+             WHERE asset_id = ?1 AND tipo = ?2",
+            params![asset_id, tipo.como_str(), motivo],
+        )?;
+        Ok(())
+    }
+
+    pub fn partes_verificadas(&self) -> Result<Vec<ParteGuardada>> {
+        let mut st = self.con.prepare(
+            "SELECT asset_id, tipo, ruta, tamano, extension, sha256 FROM partes
+             WHERE estado = 'verificado' AND ruta IS NOT NULL AND sha256 IS NOT NULL ORDER BY ruta",
+        )?;
+        let filas = st.query_map([], |r| {
+            Ok(ParteGuardada {
+                asset_id: r.get(0)?,
+                tipo: tipo_de(r.get(1)?),
+                ruta: r.get(2)?,
+                tamano: r.get::<_, i64>(3)? as u64,
+                extension: r.get(4)?,
+                sha256: r.get(5)?,
+            })
+        })?;
+        Ok(filas.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Assets personales, del listado `marca`, anteriores a `limite_unix`, con todas sus partes verificadas.
+    /// Devuelve también cuántos cumplirían salvo por no estar verificados del todo.
+    pub fn candidatos_liberar(&self, marca: i64, limite_unix: i64) -> Result<(Vec<Candidato>, u64)> {
+        let mut st = self.con.prepare(
+            "SELECT a.id, a.nombre_base, a.fecha FROM assets a
+             WHERE a.biblioteca = ?3 AND a.borrado_icloud IS NULL AND a.visto_en_lista = ?1 AND a.fecha_unix < ?2
+               AND EXISTS(SELECT 1 FROM partes p WHERE p.asset_id = a.id)
+               AND NOT EXISTS(SELECT 1 FROM partes p WHERE p.asset_id = a.id
+                              AND (p.estado <> 'verificado' OR p.sha256 IS NULL OR p.ruta IS NULL))
+             ORDER BY a.fecha_unix",
+        )?;
+        let base: Vec<(String, String, String)> = st
+            .query_map(params![marca, limite_unix, BIBLIOTECA_PERSONAL], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut st_p = self.con.prepare(
+            "SELECT asset_id, tipo, ruta, tamano, extension, sha256 FROM partes WHERE asset_id = ?1 ORDER BY tipo",
+        )?;
+        let mut candidatos = Vec::with_capacity(base.len());
+        for (id, nombre_base, fecha) in base {
+            let partes = st_p
+                .query_map(params![id], |r| {
+                    Ok(ParteGuardada {
+                        asset_id: r.get(0)?,
+                        tipo: tipo_de(r.get(1)?),
+                        ruta: r.get(2)?,
+                        tamano: r.get::<_, i64>(3)? as u64,
+                        extension: r.get(4)?,
+                        sha256: r.get(5)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            candidatos.push(Candidato { asset_id: id, nombre_base, fecha, partes });
+        }
+        let no_listos: i64 = self.con.query_row(
+            "SELECT COUNT(*) FROM assets a
+             WHERE a.biblioteca = ?3 AND a.borrado_icloud IS NULL AND a.visto_en_lista = ?1 AND a.fecha_unix < ?2
+               AND (NOT EXISTS(SELECT 1 FROM partes p WHERE p.asset_id = a.id)
+                    OR EXISTS(SELECT 1 FROM partes p WHERE p.asset_id = a.id AND p.estado <> 'verificado'))",
+            params![marca, limite_unix, BIBLIOTECA_PERSONAL],
+            |r| r.get(0),
+        )?;
+        Ok((candidatos, no_listos as u64))
+    }
+
+    pub fn marcar_borrado(&mut self, asset_id: &str, cuando: &str) -> Result<()> {
+        self.con.execute("UPDATE assets SET borrado_icloud = ?2 WHERE id = ?1", params![asset_id, cuando])?;
+        Ok(())
+    }
+
+    pub fn resumen(&self) -> Result<Resumen> {
+        let (partes, verificadas, pendientes, con_error, bytes_total, bytes_verificados): (i64, i64, i64, i64, i64, i64) =
+            self.con.query_row(
+                "SELECT COUNT(*),
+                        COALESCE(SUM(estado = 'verificado'), 0),
+                        COALESCE(SUM(estado = 'pendiente'), 0),
+                        COALESCE(SUM(estado = 'error'), 0),
+                        COALESCE(SUM(tamano), 0),
+                        COALESCE(SUM(CASE WHEN estado = 'verificado' THEN tamano ELSE 0 END), 0)
+                 FROM partes",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            )?;
+        let assets: i64 = self.con.query_row("SELECT COUNT(*) FROM assets", [], |r| r.get(0))?;
+        let completos: i64 = self.con.query_row(
+            "SELECT COUNT(*) FROM assets a WHERE EXISTS(SELECT 1 FROM partes p WHERE p.asset_id = a.id)
+               AND NOT EXISTS(SELECT 1 FROM partes p WHERE p.asset_id = a.id AND p.estado <> 'verificado')",
+            [],
+            |r| r.get(0),
+        )?;
+        let borrados: i64 = self.con.query_row("SELECT COUNT(*) FROM assets WHERE borrado_icloud IS NOT NULL", [], |r| r.get(0))?;
+        Ok(Resumen {
+            assets: assets as u64,
+            assets_completos: completos as u64,
+            partes: partes as u64,
+            verificadas: verificadas as u64,
+            pendientes: pendientes as u64,
+            con_error: con_error as u64,
+            bytes_total: bytes_total as u64,
+            bytes_verificados: bytes_verificados as u64,
+            borrados_icloud: borrados as u64,
+        })
+    }
+
+    /// Últimos errores, uno por línea: "IMG_0001 (live): motivo".
+    pub fn errores(&self, limite: usize) -> Result<Vec<String>> {
+        let mut st = self.con.prepare(
+            "SELECT a.nombre_base, p.tipo, p.ultimo_error FROM partes p JOIN assets a ON a.id = p.asset_id
+             WHERE p.estado <> 'verificado' AND p.ultimo_error IS NOT NULL ORDER BY p.intentos DESC LIMIT ?1",
+        )?;
+        let filas = st.query_map(params![limite as i64], |r| {
+            Ok(format!("{} ({}): {}", r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+        })?;
+        Ok(filas.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::modelo::{AssetIcloud, ParteIcloud, TipoParte};
+    use TipoParte::*;
+
+    const AGO: &str = "2026-08-10T19:37:18-04:00";
+    const VIEJO: &str = "2025-01-10T10:00:00-05:00";
+
+    fn asset(id: &str, bib: &str, fecha: &str, partes: &[(TipoParte, u64)]) -> AssetIcloud {
+        AssetIcloud {
+            id: id.into(),
+            biblioteca: bib.into(),
+            nombre_base: format!("IMG_{id}"),
+            fecha: fecha.into(),
+            partes: partes
+                .iter()
+                .map(|(t, n)| ParteIcloud { tipo: *t, tamano: *n, url: format!("http://x/{id}/{}", t.como_str()), extension: "HEIC".into(), checksum: "c".into() })
+                .collect(),
+        }
+    }
+
+    fn listar(r: &mut Registro, assets: &[AssetIcloud], marca: i64) {
+        for a in assets {
+            r.upsert_asset(a, marca).unwrap();
+        }
+        r.guardar_marca_lista(marca).unwrap();
+    }
+
+    fn dar_por_copiado(r: &mut Registro, id: &str, tipo: TipoParte) {
+        r.asignar_ruta(id, tipo, &format!(r"x\{id}.{}", tipo.como_str())).unwrap();
+        r.marcar_verificada(id, tipo, "sha").unwrap();
+    }
+
+    #[test]
+    fn upsert_crea_partes_pendientes() {
+        let mut r = Registro::en_memoria().unwrap();
+        listar(&mut r, &[asset("A1", "PrimarySync", AGO, &[(Original, 10), (Live, 5)])], 100);
+        let p = r.partes_pendientes(1000, None).unwrap();
+        assert_eq!(p.len(), 2);
+        assert_eq!(p[0].tipo, Original);
+        assert_eq!(p[0].ruta, None);
+        assert_eq!(p[0].tamano, 10);
+    }
+
+    #[test]
+    fn relistar_sin_cambios_conserva_lo_verificado() {
+        let mut r = Registro::en_memoria().unwrap();
+        let a = asset("A1", "PrimarySync", AGO, &[(Original, 10)]);
+        listar(&mut r, &[a.clone()], 100);
+        dar_por_copiado(&mut r, "A1", Original);
+        listar(&mut r, &[a], 200);
+        assert!(r.partes_pendientes(1000, None).unwrap().is_empty());
+        assert_eq!(r.partes_verificadas().unwrap()[0].sha256, "sha");
+    }
+
+    #[test]
+    fn cambio_de_tamano_vuelve_a_pendiente() {
+        let mut r = Registro::en_memoria().unwrap();
+        listar(&mut r, &[asset("A1", "PrimarySync", AGO, &[(Editada, 10)])], 100);
+        dar_por_copiado(&mut r, "A1", Editada);
+        listar(&mut r, &[asset("A1", "PrimarySync", AGO, &[(Editada, 11)])], 200);
+        let p = r.partes_pendientes(1000, None).unwrap();
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0].tamano, 11);
+    }
+
+    #[test]
+    fn lo_que_ya_no_esta_en_icloud_no_se_intenta() {
+        let mut r = Registro::en_memoria().unwrap();
+        listar(&mut r, &[asset("A1", "PrimarySync", AGO, &[(Original, 10)])], 100);
+        listar(&mut r, &[asset("A2", "PrimarySync", AGO, &[(Original, 10)])], 200);
+        let p = r.partes_pendientes(1000, None).unwrap();
+        assert_eq!(p.iter().map(|t| t.asset_id.as_str()).collect::<Vec<_>>(), vec!["A2"]);
+    }
+
+    #[test]
+    fn fallos_con_espera_creciente_y_error_tras_10() {
+        let mut r = Registro::en_memoria().unwrap();
+        listar(&mut r, &[asset("A1", "PrimarySync", AGO, &[(Original, 10)])], 100);
+        r.registrar_fallo("A1", Original, "corte", 1000).unwrap();
+        assert!(r.partes_pendientes(1000, None).unwrap().is_empty());
+        assert_eq!(r.partes_pendientes(1005, None).unwrap().len(), 1);
+        assert_eq!(r.proximo_reintento(None).unwrap(), Some(1005));
+        for _ in 0..9 {
+            r.registrar_fallo("A1", Original, "corte", 1000).unwrap();
+        }
+        assert_eq!(r.resumen().unwrap().con_error, 1);
+        assert_eq!(espera_reintento(10), ("error", 6 * 3600));
+        r.reintentar_ya().unwrap();
+        assert_eq!(r.partes_pendientes(1000, None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn filtro_por_mes() {
+        let mut r = Registro::en_memoria().unwrap();
+        listar(&mut r, &[
+            asset("A1", "PrimarySync", AGO, &[(Original, 10)]),
+            asset("A2", "PrimarySync", "2026-09-02T10:00:00-04:00", &[(Original, 10)]),
+        ], 100);
+        let p = r.partes_pendientes(1000, Some("2026-08")).unwrap();
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0].asset_id, "A1");
+    }
+
+    #[test]
+    fn ruta_ocupada_ignora_mayusculas() {
+        let mut r = Registro::en_memoria().unwrap();
+        listar(&mut r, &[asset("A1", "PrimarySync", AGO, &[(Original, 10)])], 100);
+        r.asignar_ruta("A1", Original, r"2026\2026-08\IMG_A1.HEIC").unwrap();
+        assert!(r.ruta_ocupada(r"2026\2026-08\img_a1.heic").unwrap());
+        assert!(!r.ruta_ocupada(r"2026\2026-08\otra.heic").unwrap());
+    }
+
+    #[test]
+    fn candidatos_liberar_aplica_reglas() {
+        let mut r = Registro::en_memoria().unwrap();
+        listar(&mut r, &[asset("A5", "PrimarySync", VIEJO, &[(Original, 1)])], 100);
+        dar_por_copiado(&mut r, "A5", Original);
+        listar(&mut r, &[
+            asset("A1", "PrimarySync", VIEJO, &[(Original, 1), (Live, 1)]),
+            asset("A2", "SharedSync-1", VIEJO, &[(Original, 1)]),
+            asset("A3", "PrimarySync", VIEJO, &[(Original, 1), (Live, 1)]),
+            asset("A4", "PrimarySync", AGO, &[(Original, 1)]),
+        ], 200);
+        for (id, t) in [("A1", Original), ("A1", Live), ("A2", Original), ("A3", Original), ("A4", Original)] {
+            dar_por_copiado(&mut r, id, t);
+        }
+        let limite = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z").unwrap().timestamp();
+        let (cands, no_listos) = r.candidatos_liberar(200, limite).unwrap();
+        assert_eq!(cands.iter().map(|c| c.asset_id.as_str()).collect::<Vec<_>>(), vec!["A1"]);
+        assert_eq!(cands[0].partes.len(), 2);
+        assert_eq!(no_listos, 1); // A3: le falta la Live
+        r.marcar_borrado("A1", "2026-11-07T10:00:00-05:00").unwrap();
+        assert!(r.candidatos_liberar(200, limite).unwrap().0.is_empty());
+    }
+
+    #[test]
+    fn resumen_y_errores() {
+        let mut r = Registro::en_memoria().unwrap();
+        listar(&mut r, &[asset("A1", "PrimarySync", AGO, &[(Original, 10), (Live, 5)])], 100);
+        dar_por_copiado(&mut r, "A1", Original);
+        r.registrar_fallo("A1", Live, "HTTP 503", 1000).unwrap();
+        let s = r.resumen().unwrap();
+        assert_eq!((s.assets, s.partes, s.verificadas, s.pendientes), (1, 2, 1, 1));
+        assert_eq!((s.bytes_total, s.bytes_verificados), (15, 10));
+        assert_eq!(r.errores(10).unwrap(), vec!["IMG_A1 (live): HTTP 503".to_string()]);
+    }
+}
