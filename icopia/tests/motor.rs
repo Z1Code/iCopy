@@ -67,11 +67,19 @@ fn reanuda_tras_corte() {
 #[test]
 fn url_caducada_pide_relistar() {
     let h = heic(100);
-    let s = servidor(vec![("/h", Comportamiento::Estado(403))]);
-    let mut f = FuenteFalsa { assets: vec![asset("A1", "IMG_0001", AGO, "PrimarySync", vec![parte(TipoParte::Original, &h, s.url("/h"), "HEIC")])], ..Default::default() };
+    let (a, b) = (jpeg(100), jpeg(200));
+    let s = servidor(vec![("/h", Comportamiento::Estado(403)), ("/a", Comportamiento::Servir(a.clone())), ("/b", Comportamiento::Servir(b.clone()))]);
+    let mut f = FuenteFalsa {
+        assets: vec![
+            asset("A1", "IMG_0001", AGO, "PrimarySync", vec![parte(TipoParte::Original, &h, s.url("/h"), "HEIC")]),
+            asset("A2", "IMG_0002", AGO, "PrimarySync", vec![parte(TipoParte::Original, &a, s.url("/a"), "JPG")]),
+            asset("A3", "IMG_0003", SEP, "PrimarySync", vec![parte(TipoParte::Original, &b, s.url("/b"), "JPG")]),
+        ],
+        ..Default::default()
+    };
     let d = tempfile::tempdir().unwrap();
-    let r = ronda(d.path(), &nuevo_registro(), &mut f);
-    assert_eq!((r.fin, r.fallidas), (FinRonda::Relistar, 1));
+    let r = ronda_con(d.path(), &nuevo_registro(), &mut f, 1, None);
+    assert_eq!((r.fin, r.fallidas, r.verificadas), (FinRonda::Relistar, 1, 2), "el resto de la ronda sigue copiándose");
 }
 
 #[test]

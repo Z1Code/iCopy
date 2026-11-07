@@ -149,7 +149,8 @@ pub fn ejecutar_ronda(
     std::thread::scope(|s| {
         for _ in 0..op.concurrencia.max(1) {
             s.spawn(|| loop {
-                if cancelar.load(Ordering::Relaxed) || relistar.load(Ordering::Relaxed) || sin_espacio.load(Ordering::Relaxed) {
+                // Un enlace caducado solo afecta a su parte: se termina la cola y luego se pide relistar.
+                if cancelar.load(Ordering::Relaxed) || sin_espacio.load(Ordering::Relaxed) {
                     break;
                 }
                 let Some(t) = cola.lock().unwrap().pop_front() else { break };
