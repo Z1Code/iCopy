@@ -1,10 +1,18 @@
 use anyhow::{anyhow, bail, Context, Result};
+use icopia::cerrojo;
 use icopia::config::{self, Config};
+use icopia::descarga;
+use icopia::energia::SinSuspension;
 use icopia::fuente::{ErrorFuente, FuenteIcloud};
 use icopia::modelo::BIBLIOTECA_PERSONAL;
+use icopia::motor::{self, Avance, FinRonda, OpcionesRonda};
 use icopia::puente::Puente;
+use icopia::registro::Registro;
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
+use std::sync::Mutex;
+use std::time::Duration;
 
 const AYUDA: &str = "icopia — copia tus fotos de iCloud al PC
 
@@ -40,6 +48,8 @@ fn ejecutar(args: &[String]) -> Result<()> {
         Some("destino") => cmd_destino(args.get(1)),
         Some("login") => cmd_login(),
         Some("diagnostico") => cmd_diagnostico(),
+        Some("copiar") => cmd_copiar(args),
+        Some("estado") => cmd_estado(),
         _ => {
             print!("{AYUDA}");
             Ok(())
@@ -47,7 +57,6 @@ fn ejecutar(args: &[String]) -> Result<()> {
     }
 }
 
-#[allow(dead_code)]
 fn opcion<'a>(args: &'a [String], nombre: &str) -> Option<&'a str> {
     args.iter().position(|a| a == nombre).and_then(|i| args.get(i + 1)).map(String::as_str)
 }
@@ -149,4 +158,90 @@ fn cmd_diagnostico() -> Result<()> {
         _ => bail!("La descarga directa falló: revisar el diseño antes de seguir."),
     }
     Ok(())
+}
+
+fn destino_de(cfg: &Config) -> Result<PathBuf> {
+    cfg.destino.clone().context("No hay destino: ejecuta `icopia destino <carpeta>`")
+}
+
+fn abrir_registro(destino: &Path) -> Result<Registro> {
+    Registro::abrir(&destino.join(".icopia").join("registro.db"))
+}
+
+fn imprimir_resumen(reg: &Registro) -> Result<()> {
+    let r = reg.resumen()?;
+    println!("Elementos de iCloud conocidos: {} (completos: {})", r.assets, r.assets_completos);
+    println!(
+        "Archivos verificados: {} de {} ({:.1} de {:.1} GB)",
+        r.verificadas, r.partes, r.bytes_verificados as f64 / 1e9, r.bytes_total as f64 / 1e9
+    );
+    println!("Pendientes: {}   Con error: {}   Borrados de iCloud: {}", r.pendientes, r.con_error, r.borrados_icloud);
+    if let Some(m) = reg.marca_lista()? {
+        if let Some(f) = chrono::DateTime::from_timestamp(m, 0) {
+            println!("Último listado de iCloud: {}", f.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M"));
+        }
+    }
+    let errores = reg.errores(10)?;
+    if !errores.is_empty() {
+        println!("Últimos errores:");
+        for e in errores {
+            println!("  - {e}");
+        }
+    }
+    Ok(())
+}
+
+fn cmd_estado() -> Result<()> {
+    let cfg = Config::cargar()?;
+    let destino = destino_de(&cfg)?;
+    println!("Destino: {}", destino.display());
+    imprimir_resumen(&abrir_registro(&destino)?)
+}
+
+fn cmd_copiar(args: &[String]) -> Result<()> {
+    let cfg = Config::cargar()?;
+    let destino = destino_de(&cfg)?;
+    let mes = opcion(args, "--mes").map(str::to_string);
+    let dir_datos = destino.join(".icopia");
+    let _cerrojo = cerrojo::intentar(&dir_datos)?
+        .context("Ya hay otra copia en marcha (¿el icono de la bandeja?). Páusala primero.")?;
+    let _energia = SinSuspension::activar();
+    let registro = Mutex::new(abrir_registro(&destino)?);
+    registro.lock().unwrap().reintentar_ya()?;
+    let http = descarga::cliente();
+    let cancelar = AtomicBool::new(false);
+    let avance = |a: Avance| match a {
+        Avance::Listando { vistos } => eprint!("\rRevisando iCloud… {vistos} elementos      "),
+        Avance::Copiando { hechas, total, actual } => eprint!("\r[{hechas}/{total}] {actual}                    "),
+    };
+    loop {
+        let mut puente = abrir_puente(&cfg)?;
+        let op = OpcionesRonda { concurrencia: cfg.concurrencia, mes: mes.clone() };
+        let r = motor::ejecutar_ronda(&destino, &registro, &mut puente, &http, &op, &cancelar, &avance)?;
+        drop(puente);
+        eprintln!();
+        println!("Ronda: {} archivos copiados y verificados, {} fallidos", r.verificadas, r.fallidas);
+        match r.fin {
+            FinRonda::Relistar => {
+                println!("Algunos enlaces de descarga caducaron; pido enlaces nuevos a iCloud…");
+                continue;
+            }
+            FinRonda::SesionCaducada => bail!("La sesión de iCloud caducó: ejecuta `icopia login`"),
+            FinRonda::SinEspacio => bail!("No queda espacio suficiente en {}", destino.display()),
+            FinRonda::DestinoAusente => bail!("No encuentro {}", destino.display()),
+            FinRonda::Cancelada => return Ok(()),
+            FinRonda::Completa => {}
+        }
+        let prox = registro.lock().unwrap().proximo_reintento(mes.as_deref())?;
+        match prox {
+            Some(t) if t - motor::ahora() <= 3600 => {
+                let s = (t - motor::ahora()).max(1) as u64;
+                println!("Reintento de lo fallido en {s} s…");
+                std::thread::sleep(Duration::from_secs(s));
+            }
+            _ => break,
+        }
+    }
+    let res = imprimir_resumen(&registro.lock().unwrap());
+    res
 }
