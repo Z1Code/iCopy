@@ -45,7 +45,11 @@ pub fn ruta_part(final_: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
-/// `<archivo>.part.meta`: identidad del contenido que se está bajando ("tamaño:checksum").
+/// Cada cuánto se fuerza a disco lo descargado y se anota en el `.meta`.
+pub const SINCRONIZAR_CADA: u64 = 16 * 1024 * 1024;
+
+/// `<archivo>.part.meta`: 1.ª línea, identidad del contenido que se está bajando ("tamaño:checksum");
+/// 2.ª línea, cuántos bytes del `.part` se sabe que están ya en disco (`sync_all`).
 pub fn ruta_meta(part: &Path) -> PathBuf {
     let mut s = part.as_os_str().to_owned();
     s.push(".meta");
@@ -58,15 +62,25 @@ pub fn borrar_part(part: &Path) {
     let _ = std::fs::remove_file(ruta_meta(part));
 }
 
-fn leer_identidad(part: &Path) -> Option<String> {
+/// (identidad, bytes sincronizados). Sin segunda línea válida se asume que no hay nada sincronizado.
+fn leer_meta(part: &Path) -> Option<(String, u64)> {
     let texto = std::fs::read_to_string(ruta_meta(part)).ok()?;
-    texto.lines().next().map(str::to_string)
+    let mut lineas = texto.lines();
+    let identidad = lineas.next()?.to_string();
+    let sincronizado = lineas.next().and_then(|l| l.trim().parse().ok()).unwrap_or(0);
+    Some((identidad, sincronizado))
 }
 
-fn escribir_meta(part: &Path, identidad: &str) -> Result<(), ErrorDescarga> {
+fn escribir_meta(part: &Path, identidad: &str, sincronizado: u64) -> Result<(), ErrorDescarga> {
     let mut f = std::fs::File::create(ruta_meta(part)).map_err(disco)?;
-    writeln!(f, "{identidad}").map_err(disco)?;
+    writeln!(f, "{identidad}\n{sincronizado}").map_err(disco)?;
     f.sync_all().map_err(disco)
+}
+
+/// Fuerza a disco el `.part` y anota cuánto hay; si falla, el `.meta` conserva un valor menor (seguro).
+fn sincronizar(archivo: &std::fs::File, part: &Path, identidad: &str, escrito: u64) -> Result<(), ErrorDescarga> {
+    archivo.sync_all().map_err(disco)?;
+    escribir_meta(part, identidad, escrito)
 }
 
 fn inicio_content_range(v: &str) -> Option<u64> {
@@ -77,13 +91,25 @@ fn inicio_content_range(v: &str) -> Option<u64> {
 /// del mismo contenido (`identidad`, anotada en `<part>.meta`); si no, empieza de cero.
 pub fn descargar(cliente: &Client, url: &str, part: &Path, tamano: u64, identidad: &str, cancelar: &AtomicBool) -> Result<(), ErrorDescarga> {
     let mut tengo = std::fs::metadata(part).map(|m| m.len()).unwrap_or(0);
-    let mismo_contenido = leer_identidad(part).as_deref() == Some(identidad);
-    if part.exists() && (tengo > tamano || !mismo_contenido) {
-        std::fs::remove_file(part).map_err(disco)?;
-        tengo = 0;
+    match leer_meta(part) {
+        Some((id, sincronizado)) if id == identidad && tengo <= tamano => {
+            // Tras un corte de luz, lo no sincronizado puede ser basura (p. ej. ceros): se descarta.
+            if tengo > sincronizado {
+                let f = OpenOptions::new().write(true).open(part).map_err(disco)?;
+                f.set_len(sincronizado).map_err(disco)?;
+                f.sync_all().map_err(disco)?;
+                tengo = sincronizado;
+            }
+        }
+        _ => {
+            if part.exists() {
+                std::fs::remove_file(part).map_err(disco)?;
+            }
+            tengo = 0;
+        }
     }
-    if !part.exists() {
-        escribir_meta(part, identidad)?;
+    if tengo == 0 {
+        escribir_meta(part, identidad, 0)?;
     }
     if tengo == tamano && tamano > 0 {
         return Ok(());
@@ -117,22 +143,27 @@ pub fn descargar(cliente: &Client, url: &str, part: &Path, tamano: u64, identida
         }
         s => return Err(ErrorDescarga::Transitorio(format!("HTTP {}", s.as_u16()))),
     };
+    if !anexar {
+        escribir_meta(part, identidad, 0)?;
+    }
     let mut archivo = if anexar {
         OpenOptions::new().append(true).open(part)
     } else {
         OpenOptions::new().create(true).write(true).truncate(true).open(part)
     }
     .map_err(disco)?;
+    let mut escrito = if anexar { tengo } else { 0 };
+    let mut sin_sincronizar = 0u64;
     let mut buf = vec![0u8; 1 << 20];
     loop {
         if cancelar.load(Ordering::Relaxed) {
-            let _ = archivo.sync_all();
+            let _ = sincronizar(&archivo, part, identidad, escrito);
             return Err(ErrorDescarga::Cancelada);
         }
         let n = match resp.read(&mut buf) {
             Ok(n) => n,
             Err(e) => {
-                let _ = archivo.sync_all();
+                let _ = sincronizar(&archivo, part, identidad, escrito);
                 return Err(ErrorDescarga::Transitorio(format!("lectura: {e}")));
             }
         };
@@ -140,8 +171,14 @@ pub fn descargar(cliente: &Client, url: &str, part: &Path, tamano: u64, identida
             break;
         }
         archivo.write_all(&buf[..n]).map_err(disco)?;
+        escrito += n as u64;
+        sin_sincronizar += n as u64;
+        if sin_sincronizar >= SINCRONIZAR_CADA {
+            sincronizar(&archivo, part, identidad, escrito)?;
+            sin_sincronizar = 0;
+        }
     }
-    archivo.sync_all().map_err(disco)?;
+    sincronizar(&archivo, part, identidad, escrito)?;
     let final_len = std::fs::metadata(part).map_err(disco)?.len();
     if final_len != tamano {
         return Err(ErrorDescarga::Transitorio(format!("descarga incompleta: {final_len} de {tamano} bytes")));

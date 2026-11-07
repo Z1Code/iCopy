@@ -114,3 +114,31 @@ fn part_sin_meta_se_descarta() {
     assert_eq!(std::fs::read(&part).unwrap(), datos);
     assert_eq!(s.peticiones_a("/a")[0].rango, None);
 }
+
+#[test]
+fn tras_un_apagon_solo_se_conserva_lo_sincronizado() {
+    let datos = patron(1000);
+    let s = servidor(vec![("/a", Comportamiento::Servir(datos.clone()))]);
+    let d = tempfile::tempdir().unwrap();
+    let part = d.path().join("a.part");
+    let mut con_ceros = datos[..600].to_vec();
+    con_ceros.extend(vec![0u8; 400]); // lo no sincronizado quedó en ceros tras el corte de luz
+    std::fs::write(&part, &con_ceros).unwrap();
+    std::fs::write(descarga::ruta_meta(&part), format!("{ID}\n600\n")).unwrap();
+    bajar(&s.url("/a"), &part, 1000).unwrap();
+    assert_eq!(s.peticiones_a("/a")[0].rango.as_deref(), Some("bytes=600-"));
+    assert_eq!(std::fs::read(&part).unwrap(), datos);
+}
+
+#[test]
+fn meta_sin_longitud_sincronizada_empieza_de_cero() {
+    let datos = patron(1000);
+    let s = servidor(vec![("/a", Comportamiento::Servir(datos.clone()))]);
+    let d = tempfile::tempdir().unwrap();
+    let part = d.path().join("a.part");
+    std::fs::write(&part, vec![0u8; 700]).unwrap();
+    std::fs::write(descarga::ruta_meta(&part), format!("{ID}\n")).unwrap();
+    bajar(&s.url("/a"), &part, 1000).unwrap();
+    assert_eq!(s.peticiones_a("/a")[0].rango, None);
+    assert_eq!(std::fs::read(&part).unwrap(), datos);
+}
