@@ -1,4 +1,5 @@
 use anyhow::{anyhow, bail, Context, Result};
+use icopia::auditoria;
 use icopia::cerrojo;
 use icopia::config::{self, Config};
 use icopia::descarga;
@@ -50,6 +51,7 @@ fn ejecutar(args: &[String]) -> Result<()> {
         Some("diagnostico") => cmd_diagnostico(),
         Some("copiar") => cmd_copiar(args),
         Some("estado") => cmd_estado(),
+        Some("verificar") => cmd_verificar(),
         _ => {
             print!("{AYUDA}");
             Ok(())
@@ -244,4 +246,27 @@ fn cmd_copiar(args: &[String]) -> Result<()> {
     }
     let res = imprimir_resumen(&registro.lock().unwrap());
     res
+}
+
+fn cmd_verificar() -> Result<()> {
+    let cfg = Config::cargar()?;
+    let destino = destino_de(&cfg)?;
+    let dir_datos = destino.join(".icopia");
+    let _cerrojo = cerrojo::intentar(&dir_datos)?.context("Hay una copia en marcha; vuelve a intentarlo luego.")?;
+    let registro = Mutex::new(abrir_registro(&destino)?);
+    let r = auditoria::verificar_todo(&destino, &registro, &AtomicBool::new(false), &|h, t| {
+        if h % 100 == 0 || h == t {
+            eprint!("\rVerificando {h}/{t}…");
+        }
+    })?;
+    eprintln!();
+    if r.malas.is_empty() {
+        println!("Todo correcto: {} archivos verificados.", r.revisadas);
+    } else {
+        println!("{} archivos dañados o ausentes (se volverán a descargar en la próxima copia):", r.malas.len());
+        for (ruta, m) in r.malas.iter().take(20) {
+            println!("  - {ruta}: {m}");
+        }
+    }
+    Ok(())
 }

@@ -12,3 +12,4 @@ pub mod motor;
 pub mod puente;
 pub mod registro;
 pub mod verificar;
+pub mod auditoria;
