@@ -146,8 +146,9 @@ pub fn mov(n: usize) -> Vec<u8> {
 }
 
 pub fn jpeg(n: usize) -> Vec<u8> {
-    let mut v = vec![0xFF, 0xD8];
-    v.extend(patron(n));
+    // SOI + COM (segmento con longitud) + SOS vacío + datos "entropía" sin 0xFF + EOI.
+    let mut v = vec![0xFF, 0xD8, 0xFF, 0xFE, 0x00, 0x04, b'o', b'k', 0xFF, 0xDA, 0x00, 0x02];
+    v.extend(patron(n).into_iter().map(|b| if b == 0xFF { 0xFE } else { b }));
     v.extend([0xFF, 0xD9]);
     v
 }

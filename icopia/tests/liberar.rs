@@ -50,14 +50,14 @@ fn prepara_solo_lo_seguro_y_borra() {
     // V2 se altera en disco después de verificarse
     let ruta_v2 = e.dir.path().join(r"2025\2025-01\IMG_V2.JPG");
     let mut v2 = std::fs::read(&ruta_v2).unwrap();
-    v2[5] ^= 0xFF;
+    v2[15] ^= 0xFF;
     std::fs::write(&ruta_v2, v2).unwrap();
 
     let plan = liberar::preparar(e.dir.path(), &e.reg, 30, motor::ahora(), &|_, _| {}).unwrap();
     assert_eq!(plan.listos.iter().map(|c| c.asset_id.as_str()).collect::<Vec<_>>(), vec!["V1"]);
     assert_eq!(plan.excluidos.iter().map(|(c, _)| c.asset_id.as_str()).collect::<Vec<_>>(), vec!["V2"]);
     assert_eq!(plan.no_verificados, 1); // P1
-    assert_eq!(plan.bytes, 104);
+    assert_eq!(plan.bytes, 114);
 
     let r = liberar::ejecutar(e.dir.path(), &e.reg, &mut e.fuente, &plan.listos, &|_, _| {}).unwrap();
     assert_eq!(r.borrados, 1);

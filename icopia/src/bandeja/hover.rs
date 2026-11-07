@@ -159,7 +159,7 @@ impl VigiaClics {
         self.pulsado = pulsado;
     }
 
-    /// pulsado: algún botón del ratón está abajo ahora. Devuelve 	rue si hay que cerrar.
+    /// pulsado: algún botón del ratón está abajo ahora. Devuelve `true` si hay que cerrar.
     pub fn actualizar(&mut self, pulsado: bool, cursor: (i32, i32), panel: Rect, icono: Option<Rect>) -> bool {
         let nuevo = pulsado && !self.pulsado;
         self.pulsado = pulsado;

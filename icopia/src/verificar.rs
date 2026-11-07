@@ -2,7 +2,7 @@
 use sha2::{Digest, Sha256};
 use std::fmt;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufRead, Read, Seek, SeekFrom};
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -65,16 +65,97 @@ fn leer_en<R: Read + Seek>(f: &mut R, pos: u64, n: usize) -> Result<Vec<u8>, Fal
     Ok(v)
 }
 
-fn jpeg<R: Read + Seek>(f: &mut R, len: u64) -> Result<(), FalloVerificacion> {
-    if len < 4 || leer_en(f, 0, 2)? != [0xFF, 0xD8] {
+fn byte<B: std::io::BufRead>(r: &mut B) -> Result<Option<u8>, FalloVerificacion> {
+    let b = r.fill_buf().map_err(lectura)?.first().copied();
+    if b.is_some() {
+        r.consume(1);
+    }
+    Ok(b)
+}
+
+/// Recorre la estructura JPEG por segmentos hasta el EOI (FF D9). Los bytes posteriores al EOI se permiten
+/// (fotos con movimiento de Android/Samsung añaden un MP4 detrás). Lee en streaming con búfer.
+fn jpeg<R: Read + Seek>(f: &mut R, _len: u64) -> Result<(), FalloVerificacion> {
+    const CORTADO: &str = "JPEG cortado antes del marcador de fin";
+    f.seek(SeekFrom::Start(0)).map_err(lectura)?;
+    let mut r = std::io::BufReader::with_capacity(1 << 16, f);
+    let cortado = || FalloVerificacion::Estructura(CORTADO.into());
+    if byte(&mut r)? != Some(0xFF) || byte(&mut r)? != Some(0xD8) {
         return Err(FalloVerificacion::Estructura("no empieza como JPEG".into()));
     }
-    let cola = len.min(4096);
-    let fin = leer_en(f, len - cola, cola as usize)?;
-    if fin.windows(2).any(|w| w == [0xFF, 0xD9]) {
-        Ok(())
-    } else {
-        Err(FalloVerificacion::Estructura("JPEG sin marcador de fin".into()))
+    // Marcador pendiente ya leído (tras un escaneo de datos entropía) o None.
+    let mut pendiente: Option<u8> = None;
+    loop {
+        let m = match pendiente.take() {
+            Some(m) => m,
+            None => {
+                if byte(&mut r)?.ok_or_else(cortado)? != 0xFF {
+                    return Err(FalloVerificacion::Estructura("JPEG: se esperaba un marcador".into()));
+                }
+                let mut m = byte(&mut r)?.ok_or_else(cortado)?;
+                while m == 0xFF {
+                    m = byte(&mut r)?.ok_or_else(cortado)?;
+                }
+                m
+            }
+        };
+        match m {
+            0xD9 => return Ok(()),
+            0x00 => return Err(FalloVerificacion::Estructura("JPEG: marcador inválido".into())),
+            0x01 | 0xD0..=0xD8 => {}
+            _ => {
+                let hi = byte(&mut r)?.ok_or_else(cortado)?;
+                let lo = byte(&mut r)?.ok_or_else(cortado)?;
+                let l = u16::from_be_bytes([hi, lo]) as usize;
+                if l < 2 {
+                    return Err(FalloVerificacion::Estructura("JPEG: longitud de segmento inválida".into()));
+                }
+                // Salta el contenido del segmento (sin leerlo a memoria).
+                let mut resto = l - 2;
+                while resto > 0 {
+                    let n = {
+                        let b = r.fill_buf().map_err(lectura)?;
+                        if b.is_empty() {
+                            return Err(cortado());
+                        }
+                        b.len().min(resto)
+                    };
+                    r.consume(n);
+                    resto -= n;
+                }
+                if m == 0xDA {
+                    // Datos entropía: FF 00 y RSTn siguen; otro marcador reanuda el recorrido.
+                    loop {
+                        let b = {
+                            let buf = r.fill_buf().map_err(lectura)?;
+                            if buf.is_empty() {
+                                return Err(cortado());
+                            }
+                            match buf.iter().position(|&x| x == 0xFF) {
+                                Some(i) => {
+                                    r.consume(i + 1);
+                                    None
+                                }
+                                None => Some(buf.len()),
+                            }
+                        };
+                        if let Some(n) = b {
+                            r.consume(n);
+                            continue;
+                        }
+                        let mut s = byte(&mut r)?.ok_or_else(cortado)?;
+                        while s == 0xFF {
+                            s = byte(&mut r)?.ok_or_else(cortado)?;
+                        }
+                        if s == 0x00 || (0xD0..=0xD7).contains(&s) {
+                            continue;
+                        }
+                        pendiente = Some(s);
+                        break;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -170,13 +251,104 @@ mod tests {
 
     #[test]
     fn jpeg_y_png() {
-        let jpg = [0xFF, 0xD8, 1, 2, 3, 0xFF, 0xD9];
+        let jpg = jpeg_base();
         assert_eq!(est(&jpg, "jpg"), Ok(()));
-        assert!(est(&jpg[..5], "JPEG").is_err());
+        assert!(est(&jpg[..jpg.len() - 3], "JPEG").is_err());
+        assert!(est(b"no es un jpeg", "JPG").is_err());
         let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3];
         png.extend_from_slice(&[0, 0, 0, 0, b'I', b'E', b'N', b'D', 0xAE, 0x42, 0x60, 0x82]);
         assert_eq!(est(&png, "PNG"), Ok(()));
         assert!(est(&png[..png.len() - 1], "PNG").is_err());
+    }
+
+    fn seg(m: u8, carga: &[u8]) -> Vec<u8> {
+        let mut v = vec![0xFF, m];
+        v.extend_from_slice(&((carga.len() + 2) as u16).to_be_bytes());
+        v.extend_from_slice(carga);
+        v
+    }
+
+    /// JPEG sintético: SOI, APP0, DQT, SOF, DHT, SOS + entropía (con FF 00 y RST) + EOI.
+    fn jpeg_base() -> Vec<u8> {
+        let mut v = vec![0xFF, 0xD8];
+        v.extend(seg(0xE0, b"JFIF "));
+        v.extend(seg(0xDB, &[0u8; 65]));
+        v.extend(seg(0xC0, &[8, 0, 8, 0, 8, 1, 1, 0x11, 0]));
+        v.extend(seg(0xC4, &[0u8; 20]));
+        v.extend(seg(0xDA, &[1, 1, 0, 0, 63, 0]));
+        v.extend_from_slice(&[1, 2, 0xFF, 0x00, 3, 0xFF, 0xD0, 4, 0xFF, 0xFF, 0x00, 5]);
+        v.extend_from_slice(&[0xFF, 0xD9]);
+        v
+    }
+
+    fn jpeg_progresivo() -> Vec<u8> {
+        let mut v = vec![0xFF, 0xD8];
+        v.extend(seg(0xC2, &[8, 0, 8, 0, 8, 1, 1, 0x11, 0]));
+        for _ in 0..3 {
+            v.extend(seg(0xC4, &[0u8; 20]));
+            v.extend(seg(0xDA, &[1, 1, 0, 0, 0, 0]));
+            v.extend_from_slice(&[9, 8, 0xFF, 0x00, 7]);
+        }
+        v.extend_from_slice(&[0xFF, 0xD9]);
+        v
+    }
+
+    fn es_estructura(r: Result<(), FalloVerificacion>) -> bool {
+        matches!(r, Err(FalloVerificacion::Estructura(_)))
+    }
+
+    #[test]
+    fn jpeg_sintetico_base_y_progresivo() {
+        assert_eq!(est(&jpeg_base(), "JPG"), Ok(()));
+        assert_eq!(est(&jpeg_progresivo(), "JPG"), Ok(()));
+    }
+
+    #[test]
+    fn jpeg_con_datos_tras_el_eoi_motion_photo() {
+        let mut v = jpeg_base();
+        v.extend(caja(b"ftyp", b"mp42    mp42"));
+        v.extend(vec![0xAB; 2 << 20]);
+        assert_eq!(est(&v, "jpg"), Ok(()));
+    }
+
+    #[test]
+    fn jpeg_cortado_en_entropia_o_en_segmento_falla() {
+        let v = jpeg_base();
+        assert!(es_estructura(est(&v[..v.len() - 2], "JPG")), "sin EOI");
+        assert!(es_estructura(est(&v[..v.len() - 1], "JPG")), "FF suelto");
+        assert!(es_estructura(est(&v[..30], "JPG")), "a mitad de segmento");
+        assert!(es_estructura(est(&[0xFF, 0xD8, 0xFF], "JPG")));
+        let p = jpeg_progresivo();
+        assert!(es_estructura(est(&p[..p.len() - 2], "JPG")));
+    }
+
+    #[test]
+    fn jpeg_miniatura_exif_con_eoi_no_cuenta() {
+        let mut miniatura = jpeg_base();
+        miniatura.truncate(miniatura.len());
+        let mut v = vec![0xFF, 0xD8];
+        v.extend(seg(0xE1, &[b"Exif  ".as_slice(), &miniatura].concat()));
+        v.extend(seg(0xC0, &[8, 0, 8, 0, 8, 1, 1, 0x11, 0]));
+        v.extend(seg(0xDA, &[1, 1, 0, 0, 63, 0]));
+        v.extend_from_slice(&[1, 2, 3]);
+        assert!(es_estructura(est(&v, "JPG")), "imagen principal cortada");
+        v.extend_from_slice(&[0xFF, 0xD9]);
+        assert_eq!(est(&v, "JPG"), Ok(()));
+    }
+
+    #[test]
+    fn jpeg_reales_de_pillow_base_y_progresivo() {
+        for (nombre, datos) in [
+            ("base", &include_bytes!("../tests/datos/base.jpg")[..]),
+            ("prog", &include_bytes!("../tests/datos/prog.jpg")[..]),
+        ] {
+            assert_eq!(est(datos, "JPG"), Ok(()), "{nombre}");
+            let mut con_cola = datos.to_vec();
+            con_cola.extend(vec![0x55; 3 << 20]);
+            assert_eq!(est(&con_cola, "JPG"), Ok(()), "{nombre} + cola");
+            assert!(es_estructura(est(&datos[..datos.len() - 2], "JPG")), "{nombre} sin EOI");
+            assert!(es_estructura(est(&datos[..datos.len() / 2], "JPG")), "{nombre} a la mitad");
+        }
     }
 
     #[test]
