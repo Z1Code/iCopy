@@ -43,6 +43,23 @@ pub fn normalizar_codigo(texto: &str) -> Option<String> {
     (c.len() == 6 && c.chars().all(|c| c.is_ascii_digit())).then_some(c)
 }
 
+/// Resultado de comprobar la sesión guardada antes de pedir la contraseña.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EstadoSesion {
+    Valida,
+    Caducada,
+    /// No se pudo comprobar (red, puente…): se ofrece iniciar sesión igualmente.
+    Desconocida(String),
+}
+
+pub fn comprobar_sesion<P: PuenteLogin>(puente: &mut P) -> EstadoSesion {
+    match puente.sesion() {
+        Ok(()) => EstadoSesion::Valida,
+        Err(ErrorFuente::SesionCaducada) => EstadoSesion::Caducada,
+        Err(e) => EstadoSesion::Desconocida(e.to_string()),
+    }
+}
+
 pub struct FlujoLogin<P> {
     puente: P,
     fallos: u32,
@@ -184,6 +201,14 @@ mod tests {
         fl.entrar("pw");
         assert!(matches!(fl.verificar("111111"), Paso::Reintentar(_)));
         assert_eq!(fl.verificar("222222"), Paso::Hecho);
+    }
+
+    #[test]
+    fn comprobar_sesion_guardada() {
+        let mut f = Falso { sesion: [Ok(()), Err(ErrorFuente::SesionCaducada), Err(ErrorFuente::Otro("sin red".into()))].into(), ..Default::default() };
+        assert_eq!(comprobar_sesion(&mut f), EstadoSesion::Valida);
+        assert_eq!(comprobar_sesion(&mut f), EstadoSesion::Caducada);
+        assert!(matches!(comprobar_sesion(&mut f), EstadoSesion::Desconocida(m) if m.contains("sin red")));
     }
 
     #[test]

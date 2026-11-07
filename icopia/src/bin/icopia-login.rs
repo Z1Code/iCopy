@@ -2,7 +2,7 @@
 //! Ventana pequeña para iniciar sesión en iCloud (lo mismo que `icopia login`, sin consola).
 //! Sale con código 0 si la sesión quedó iniciada; 1 si se cierra o cancela.
 use icopia::config::{self, Config};
-use icopia::login::{normalizar_codigo, FlujoLogin, Paso};
+use icopia::login::{comprobar_sesion, normalizar_codigo, EstadoSesion, FlujoLogin, Paso};
 use icopia::puente::Puente;
 use native_windows_gui as nwg;
 use std::cell::{Cell, RefCell};
@@ -16,11 +16,14 @@ use windows_sys::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow, G
 use windows_sys::Win32::UI::WindowsAndMessaging as wm;
 
 enum Orden {
+    /// Comprueba la sesión guardada de este Apple ID.
+    Comprobar(String),
     Entrar { apple_id: String, password: String },
     Codigo(String),
 }
 
 enum Respuesta {
+    Sesion(EstadoSesion),
     Paso(Paso),
     Cerrar,
 }
@@ -31,6 +34,15 @@ fn trabajador(rx: Receiver<Orden>, tx: Sender<Respuesta>, aviso: nwg::NoticeSend
     let mut apple_id = String::new();
     for orden in rx {
         let mut paso = match orden {
+            Orden::Comprobar(id) => {
+                let r = match Puente::iniciar(&id, &config::dir_sesion(), &config::log_puente()) {
+                    Ok(mut p) => comprobar_sesion(&mut p),
+                    Err(e) => EstadoSesion::Desconocida(format!("{e:#}")),
+                };
+                let _ = tx.send(Respuesta::Sesion(r));
+                aviso.notice();
+                continue;
+            }
             Orden::Entrar { apple_id: id, password } => {
                 flujo = None; // cierra el puente anterior: el Apple ID pudo cambiar
                 apple_id = id;
@@ -74,9 +86,20 @@ fn trabajador(rx: Receiver<Orden>, tx: Sender<Respuesta>, aviso: nwg::NoticeSend
 
 #[derive(Clone, Copy, PartialEq, Default)]
 enum Etapa {
+    /// Comprobando si la sesión guardada sigue valiendo.
+    Comprobando,
+    /// La sesión guardada vale: no hace falta la contraseña.
+    YaIniciada,
     #[default]
     Credenciales,
     Codigo,
+}
+
+impl Etapa {
+    /// Las etapas sin campos usan una ventana más baja.
+    fn compacta(self) -> bool {
+        matches!(self, Etapa::Comprobando | Etapa::YaIniciada)
+    }
 }
 
 /// Color de la línea de estado.
@@ -90,13 +113,15 @@ enum Tono {
 
 const SUB_CREDENCIALES: &str = "Usa tu Apple ID. La contraseña solo se envía a Apple; icopia no la guarda.";
 const SUB_CODIGO: &str = "Escribe el código de 6 dígitos que apareció en tu iPhone.";
+const TITULO_VENTANA: &str = "Iniciar sesión · icopia";
 
 // Medidas en píxeles a 96 ppp (rejilla de 8 px); se escalan con el DPI del monitor.
 const ANCHO: i32 = 400;
 const MARGEN: i32 = 24;
 const ICONO: i32 = 40;
 const BARRA: i32 = 288; // empieza la barra inferior de botones
-const ALTO: i32 = BARRA + 64;
+const BARRA_COMPACTA: i32 = 128;
+const ALTO_BARRA: i32 = 64;
 const BOTON: (i32, i32) = (112, 32);
 
 const BLANCO: u32 = rgb(255, 255, 255);
@@ -178,6 +203,8 @@ struct Ui {
     b_cancelar: nwg::Button,
     b_entrar: nwg::Button,
     b_verificar: nwg::Button,
+    b_cambiar: nwg::Button,
+    b_cerrar: nwg::Button,
     aviso: nwg::Notice,
     // Estado visual
     etapa: Cell<Etapa>,
@@ -189,8 +216,19 @@ struct Ui {
 
 impl Ui {
     fn mostrar_etapa(&self, e: Etapa) {
-        let cred = e == Etapa::Credenciales;
-        self.subtitulo.set_text(if cred { SUB_CREDENCIALES } else { SUB_CODIGO });
+        let cambia_alto = e.compacta() != self.etapa.get().compacta();
+        let (cred, cod) = (e == Etapa::Credenciales, e == Etapa::Codigo);
+        let (titulo, subtitulo) = match e {
+            Etapa::Comprobando => ("Comprobando tu sesión…".to_string(), format!("Mirando si la sesión de {} sigue activa…", self.t_id.text().trim())),
+            Etapa::YaIniciada => (
+                "Ya tienes sesión iniciada".to_string(),
+                format!("Sesión activa como {}. icopia te avisará cuando caduque.", self.t_id.text().trim()),
+            ),
+            Etapa::Credenciales => ("Inicia sesión en iCloud".to_string(), SUB_CREDENCIALES.to_string()),
+            Etapa::Codigo => ("Inicia sesión en iCloud".to_string(), SUB_CODIGO.to_string()),
+        };
+        self.titulo.set_text(&titulo);
+        self.subtitulo.set_text(&subtitulo);
         for c in [&self.l_id, &self.l_pw] {
             c.set_visible(cred);
         }
@@ -198,11 +236,46 @@ impl Ui {
             c.set_visible(cred);
         }
         self.b_entrar.set_visible(cred);
-        self.l_codigo.set_visible(!cred);
-        self.t_codigo.set_visible(!cred);
-        self.b_verificar.set_visible(!cred);
+        self.l_codigo.set_visible(cod);
+        self.t_codigo.set_visible(cod);
+        self.b_verificar.set_visible(cod);
+        self.b_cancelar.set_visible(e != Etapa::YaIniciada);
+        self.b_cambiar.set_visible(e == Etapa::YaIniciada);
+        self.b_cerrar.set_visible(e == Etapa::YaIniciada);
+        self.estado.set_visible(!e.compacta());
         self.etapa.set(e);
         self.colocar(self.estado.0, self.sitio_estado());
+        self.colocar(self.subtitulo.0, self.sitio_subtitulo());
+        self.colocar_botones();
+        if cambia_alto {
+            self.dimensionar_y_centrar();
+        }
+        unsafe { gdi::InvalidateRect(hwnd(&self.ventana.handle), std::ptr::null(), 1) };
+    }
+
+    fn barra(&self) -> i32 {
+        if self.etapa.get().compacta() {
+            BARRA_COMPACTA
+        } else {
+            BARRA
+        }
+    }
+
+    /// Botones de la barra inferior: el principal a la derecha y el secundario a su izquierda.
+    fn colocar_botones(&self) {
+        let (bw, bh) = BOTON;
+        let by = self.barra() + (ALTO_BARRA - bh) / 2;
+        let primario_x = ANCHO - MARGEN - bw;
+        let ancho_cambiar = 144;
+        for (b, sitio) in [
+            (&self.b_cancelar, (primario_x - 8 - bw, by, bw, bh)),
+            (&self.b_entrar, (primario_x, by, bw, bh)),
+            (&self.b_verificar, (primario_x, by, bw, bh)),
+            (&self.b_cerrar, (primario_x, by, bw, bh)),
+            (&self.b_cambiar, (primario_x - 8 - ancho_cambiar, by, ancho_cambiar, bh)),
+        ] {
+            self.colocar(hwnd(&b.handle), sitio);
+        }
     }
 
     fn habilitar(&self, si: bool) {
@@ -220,6 +293,12 @@ impl Ui {
 
     fn esc(&self, v: i32) -> i32 {
         (v * self.dpi.get() as i32 + 48) / 96
+    }
+
+    /// El subtítulo admite tres líneas en las etapas sin campos (el Apple ID puede ser largo).
+    fn sitio_subtitulo(&self) -> (i32, i32, i32, i32) {
+        let x = MARGEN + ICONO + 16;
+        (x, 52, ANCHO - MARGEN - x, if self.etapa.get().compacta() { 56 } else { 36 })
     }
 
     /// La línea de estado va justo debajo del último campo de la etapa.
@@ -250,19 +329,16 @@ impl Ui {
         for t in [&self.t_id, &self.t_pw, &self.t_codigo] {
             t.set_font(Some(&normal));
         }
-        for b in [&self.b_cancelar, &self.b_entrar, &self.b_verificar] {
+        for b in [&self.b_cancelar, &self.b_entrar, &self.b_verificar, &self.b_cambiar, &self.b_cerrar] {
             b.set_font(Some(&normal));
         }
         *self.fuentes.borrow_mut() = Some((normal, titulo));
 
         let texto_x = MARGEN + ICONO + 16;
         let ancho_campo = ANCHO - 2 * MARGEN;
-        let (bw, bh) = BOTON;
-        let by = BARRA + (ALTO - BARRA - bh) / 2;
-        let primario_x = ANCHO - MARGEN - bw;
-        let sitios: [(HWND, (i32, i32, i32, i32)); 12] = [
+        let sitios: [(HWND, (i32, i32, i32, i32)); 9] = [
             (self.titulo.0, (texto_x, 22, ANCHO - MARGEN - texto_x, 28)),
-            (self.subtitulo.0, (texto_x, 52, ANCHO - MARGEN - texto_x, 36)),
+            (self.subtitulo.0, self.sitio_subtitulo()),
             (self.l_id.0, (MARGEN, 104, ancho_campo, 20)),
             (hwnd(&self.t_id.handle), (MARGEN, 126, ancho_campo, 28)),
             (self.l_pw.0, (MARGEN, 164, ancho_campo, 20)),
@@ -270,13 +346,11 @@ impl Ui {
             (self.l_codigo.0, (MARGEN, 104, ancho_campo, 20)),
             (hwnd(&self.t_codigo.handle), (MARGEN, 126, 160, 28)),
             (self.estado.0, self.sitio_estado()),
-            (hwnd(&self.b_cancelar.handle), (primario_x - 8 - bw, by, bw, bh)),
-            (hwnd(&self.b_entrar.handle), (primario_x, by, bw, bh)),
-            (hwnd(&self.b_verificar.handle), (primario_x, by, bw, bh)),
         ];
         for (h, sitio) in sitios {
             self.colocar(h, sitio);
         }
+        self.colocar_botones();
         // Un poco de aire a los lados del texto en las cajas.
         let m = self.esc(4) as isize;
         for t in [&self.t_id, &self.t_pw, &self.t_codigo] {
@@ -310,7 +384,7 @@ impl Ui {
         unsafe {
             let estilo = wm::GetWindowLongW(v, wm::GWL_STYLE) as u32;
             let estilo_ex = wm::GetWindowLongW(v, wm::GWL_EXSTYLE) as u32;
-            let mut r = RECT { left: 0, top: 0, right: self.esc(ANCHO), bottom: self.esc(ALTO) };
+            let mut r = RECT { left: 0, top: 0, right: self.esc(ANCHO), bottom: self.esc(self.barra() + ALTO_BARRA) };
             AdjustWindowRectExForDpi(&mut r, estilo, 0, estilo_ex, self.dpi.get());
             let (w, h) = (r.right - r.left, r.bottom - r.top);
             let mut info: gdi::MONITORINFO = std::mem::zeroed();
@@ -329,7 +403,7 @@ impl Ui {
         unsafe {
             let mut r: RECT = std::mem::zeroed();
             wm::GetClientRect(v, &mut r);
-            let barra = self.esc(BARRA);
+            let barra = self.esc(self.barra());
             let rellenar = |rect: RECT, color: u32| {
                 let pincel = gdi::CreateSolidBrush(color);
                 gdi::FillRect(dc, &rect, pincel);
@@ -366,8 +440,8 @@ impl Ui {
 fn construir(ui: &mut Ui, apple_id: &str) -> Result<(), nwg::NwgError> {
     nwg::Window::builder()
         .flags(nwg::WindowFlags::WINDOW)
-        .size((ANCHO, ALTO))
-        .title("Iniciar sesión · icopia")
+        .size((ANCHO, BARRA + ALTO_BARRA))
+        .title(TITULO_VENTANA)
         .build(&mut ui.ventana)?;
     let v = &ui.ventana;
     let padre = hwnd(&v.handle);
@@ -383,15 +457,41 @@ fn construir(ui: &mut Ui, apple_id: &str) -> Result<(), nwg::NwgError> {
     nwg::Button::builder().text("Cancelar").parent(v).build(&mut ui.b_cancelar)?;
     nwg::Button::builder().text("Entrar").parent(v).build(&mut ui.b_entrar)?;
     nwg::Button::builder().text("Verificar").parent(v).build(&mut ui.b_verificar)?;
+    nwg::Button::builder().text("Cambiar de cuenta").parent(v).build(&mut ui.b_cambiar)?;
+    nwg::Button::builder().text("Cerrar").parent(v).build(&mut ui.b_cerrar)?;
     nwg::Notice::builder().parent(v).build(&mut ui.aviso)?;
     // Los botones de acción se dibujan como botón predeterminado (Intro).
-    for b in [&ui.b_entrar, &ui.b_verificar] {
+    for b in [&ui.b_entrar, &ui.b_verificar, &ui.b_cerrar] {
         unsafe { wm::SendMessageW(hwnd(&b.handle), wm::BM_SETSTYLE, wm::BS_DEFPUSHBUTTON as usize, 1) };
     }
     Ok(())
 }
 
+/// Solo una ventana de inicio de sesión a la vez: si ya hay una, se trae al frente.
+fn instancia_unica() -> bool {
+    use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+    use windows_sys::Win32::System::Threading::CreateMutexW;
+    let sufijo = std::env::var("ICOPIA_DIR").map(|d| format!("-{:x}", d.bytes().fold(0u64, |h, b| h.wrapping_mul(131).wrapping_add(b as u64)))).unwrap_or_default();
+    let nombre: Vec<u16> = format!("Local\\icopia-login{sufijo}\0").encode_utf16().collect();
+    unsafe {
+        let h = CreateMutexW(std::ptr::null(), 0, nombre.as_ptr());
+        if !h.is_null() && GetLastError() != ERROR_ALREADY_EXISTS {
+            return true;
+        }
+        let titulo: Vec<u16> = TITULO_VENTANA.encode_utf16().chain([0]).collect();
+        let otra = wm::FindWindowW(std::ptr::null(), titulo.as_ptr());
+        if !otra.is_null() {
+            wm::ShowWindow(otra, wm::SW_RESTORE);
+            wm::SetForegroundWindow(otra);
+        }
+        false
+    }
+}
+
 fn main() {
+    if !instancia_unica() {
+        std::process::exit(1);
+    }
     let apple_id = Config::cargar().ok().and_then(|c| c.apple_id).unwrap_or_default();
     nwg::init().expect("no pude iniciar la interfaz");
     let mut ui = Ui::default();
@@ -431,32 +531,36 @@ fn main() {
     })
     .expect("manejador de la ventana");
 
-    ui.maquetar(unsafe { GetDpiForWindow(hwnd(&ui.ventana.handle)) });
-    ui.dimensionar_y_centrar();
-    ui.mostrar_etapa(Etapa::Credenciales);
-    ui.ventana.set_visible(true);
-    if apple_id.is_empty() {
-        ui.t_id.set_focus();
-    } else {
-        ui.t_pw.set_focus();
-    }
-
     let (tx_orden, rx_orden) = mpsc::channel::<Orden>();
     let (tx_resp, rx_resp) = mpsc::channel::<Respuesta>();
     let aviso = ui.aviso.sender();
     std::thread::spawn(move || trabajador(rx_orden, tx_resp, aviso));
 
+    // Con un Apple ID guardado, primero se mira si la sesión sigue valiendo.
+    let inicial = if apple_id.is_empty() { Etapa::Credenciales } else { Etapa::Comprobando };
+    ui.etapa.set(inicial);
+    ui.maquetar(unsafe { GetDpiForWindow(hwnd(&ui.ventana.handle)) });
+    ui.dimensionar_y_centrar();
+    ui.mostrar_etapa(inicial);
+    ui.ventana.set_visible(true);
+    if inicial == Etapa::Comprobando {
+        ui.b_cancelar.set_focus();
+        let _ = tx_orden.send(Orden::Comprobar(apple_id.clone()));
+    } else {
+        ui.t_id.set_focus();
+    }
+
     let exito = Rc::new(Cell::new(false));
-    let etapa = Rc::new(Cell::new(Etapa::Credenciales));
-    let ocupado = Rc::new(Cell::new(false));
+    let ocupado = Rc::new(Cell::new(inicial == Etapa::Comprobando));
 
     let enviar = {
-        let (ui, etapa, ocupado) = (ui.clone(), etapa.clone(), ocupado.clone());
+        let (ui, ocupado) = (ui.clone(), ocupado.clone());
         move || {
             if ocupado.get() {
                 return;
             }
-            let orden = match etapa.get() {
+            let orden = match ui.etapa.get() {
+                Etapa::Comprobando | Etapa::YaIniciada => return,
                 Etapa::Credenciales => {
                     let apple_id = ui.t_id.text().trim().to_string();
                     let password = ui.t_pw.text();
@@ -490,7 +594,7 @@ fn main() {
     };
 
     let recibir = {
-        let (ui, etapa, ocupado, exito) = (ui.clone(), etapa.clone(), ocupado.clone(), exito.clone());
+        let (ui, ocupado, exito) = (ui.clone(), ocupado.clone(), exito.clone());
         move || {
             while let Ok(r) = rx_resp.try_recv() {
                 let paso = match r {
@@ -498,9 +602,34 @@ fn main() {
                         nwg::stop_thread_dispatch();
                         return;
                     }
+                    Respuesta::Sesion(s) => {
+                        if ui.etapa.get() != Etapa::Comprobando {
+                            continue; // el usuario ya eligió otra cosa
+                        }
+                        ocupado.set(false);
+                        match s {
+                            EstadoSesion::Valida => {
+                                exito.set(true);
+                                ui.mostrar_etapa(Etapa::YaIniciada);
+                                ui.b_cerrar.set_focus();
+                            }
+                            EstadoSesion::Caducada => {
+                                ui.mostrar_etapa(Etapa::Credenciales);
+                                ui.avisar(Tono::Info, "Tu sesión caducó. Vuelve a escribir la contraseña.");
+                                ui.t_pw.set_focus();
+                            }
+                            EstadoSesion::Desconocida(m) => {
+                                ui.mostrar_etapa(Etapa::Credenciales);
+                                ui.avisar(Tono::Error, &format!("No pude comprobar la sesión: {m}"));
+                                ui.t_pw.set_focus();
+                            }
+                        }
+                        continue;
+                    }
                     Respuesta::Paso(p) => p,
                 };
                 ocupado.set(false);
+                let mut etapa = ui.etapa.get();
                 match paso {
                     Paso::Hecho => {
                         exito.set(true);
@@ -509,45 +638,59 @@ fn main() {
                         continue;
                     }
                     Paso::PideCodigo => {
-                        etapa.set(Etapa::Codigo);
+                        etapa = Etapa::Codigo;
                         ui.t_pw.set_text("");
                         ui.t_codigo.set_text("");
                         ui.avisar(Tono::Info, "Apple ha enviado un código a tu iPhone.");
                     }
                     Paso::Reintentar(m) => {
                         ui.avisar(Tono::Error, &m);
-                        match etapa.get() {
-                            Etapa::Credenciales => ui.t_pw.set_text(""),
+                        match etapa {
                             Etapa::Codigo => ui.t_codigo.set_text(""),
+                            _ => ui.t_pw.set_text(""),
                         }
                     }
                     Paso::Fallo(m) => {
-                        etapa.set(Etapa::Credenciales);
+                        etapa = Etapa::Credenciales;
                         ui.t_pw.set_text("");
                         ui.t_codigo.set_text("");
                         ui.avisar(Tono::Error, &m);
                     }
                 }
-                ui.mostrar_etapa(etapa.get());
+                ui.mostrar_etapa(etapa);
                 ui.habilitar(true);
-                match etapa.get() {
-                    Etapa::Credenciales if ui.t_id.text().trim().is_empty() => ui.t_id.set_focus(),
-                    Etapa::Credenciales => ui.t_pw.set_focus(),
+                match etapa {
                     Etapa::Codigo => ui.t_codigo.set_focus(),
+                    _ if ui.t_id.text().trim().is_empty() => ui.t_id.set_focus(),
+                    _ => ui.t_pw.set_focus(),
                 }
             }
+        }
+    };
+
+    let cambiar_cuenta = {
+        let (ui, exito) = (ui.clone(), exito.clone());
+        move || {
+            exito.set(false);
+            ui.mostrar_etapa(Etapa::Credenciales);
+            ui.avisar(Tono::Info, "");
+            ui.t_id.set_focus();
+            unsafe { wm::SendMessageW(hwnd(&ui.t_id.handle), 0x00B1 /* EM_SETSEL */, 0, -1) };
         }
     };
 
     let ui_ev = ui.clone();
     let manejador = nwg::full_bind_event_handler(&ui.ventana.handle, move |evento, _datos, handle| {
         use nwg::Event as E;
+        let ya = ui_ev.etapa.get() == Etapa::YaIniciada;
         match evento {
             E::OnWindowClose if handle == ui_ev.ventana.handle => nwg::stop_thread_dispatch(),
             E::OnKeyEsc => nwg::stop_thread_dispatch(),
-            E::OnKeyEnter if handle == ui_ev.b_cancelar.handle => nwg::stop_thread_dispatch(),
+            E::OnKeyEnter if handle == ui_ev.b_cancelar.handle || ya && handle != ui_ev.b_cambiar.handle => nwg::stop_thread_dispatch(),
+            E::OnKeyEnter if handle == ui_ev.b_cambiar.handle => cambiar_cuenta(),
             E::OnKeyEnter => enviar(),
-            E::OnButtonClick if handle == ui_ev.b_cancelar.handle => nwg::stop_thread_dispatch(),
+            E::OnButtonClick if handle == ui_ev.b_cancelar.handle || handle == ui_ev.b_cerrar.handle => nwg::stop_thread_dispatch(),
+            E::OnButtonClick if handle == ui_ev.b_cambiar.handle => cambiar_cuenta(),
             E::OnButtonClick if handle == ui_ev.b_entrar.handle || handle == ui_ev.b_verificar.handle => enviar(),
             E::OnNotice if handle == ui_ev.aviso.handle => recibir(),
             _ => {}
