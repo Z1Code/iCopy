@@ -1,7 +1,7 @@
 //! Ventana del panel de progreso: sin bordes, esquinas redondeadas, encima de la bandeja,
 //! junto al reloj (como los paneles de Wi-Fi o volumen de Windows 11).
 use crate::bandeja::estado::EstadoUi;
-use crate::bandeja::hover::{self, Hover};
+use crate::bandeja::hover::{self, Hover, Rect, VigiaClics};
 use crate::bandeja::panel::{es_nueva_ronda, principal, vista, Principal, Velocimetro};
 use crate::bandeja::panel_gdi::{self, Boton, Lienzo};
 use crate::descarga::BYTES_RECIBIDOS;
@@ -15,6 +15,34 @@ use tao::platform::windows::{WindowBuilderExtWindows, WindowExtWindows};
 use tao::window::{Window, WindowBuilder, WindowId};
 use windows_sys::Win32::Foundation::{HWND, POINT};
 use windows_sys::Win32::Graphics::Gdi as gdi;
+
+#[link(name = "user32")]
+extern "system" {
+    fn GetAsyncKeyState(tecla: i32) -> i16;
+}
+
+/// ¿Hay algún botón del ratón pulsado ahora mismo (en cualquier ventana)?
+pub fn boton_raton_pulsado() -> bool {
+    // VK_LBUTTON, VK_RBUTTON, VK_MBUTTON
+    [0x01, 0x02, 0x04].into_iter().any(|vk| unsafe { GetAsyncKeyState(vk) } < 0)
+}
+
+/// Pone hwnd en primer plano aunque Windows lo restrinja a otro proceso: se engancha un
+/// momento a la cola de entrada del hilo que tiene el primer plano. Así un menú o panel recibe
+/// la desactivación (y se cierra) al hacer clic fuera.
+pub fn traer_al_frente(hwnd: HWND) {
+    use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow};
+    unsafe {
+        let mio = GetCurrentThreadId();
+        let otro = GetWindowThreadProcessId(GetForegroundWindow(), std::ptr::null_mut());
+        let enganchado = otro != 0 && otro != mio && AttachThreadInput(mio, otro, 1) != 0;
+        SetForegroundWindow(hwnd);
+        if enganchado {
+            AttachThreadInput(mio, otro, 0);
+        }
+    }
+}
 
 /// Lo que el usuario pidió desde el panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +65,8 @@ pub struct Panel {
     oculto_en: Option<Instant>,
     /// Abrir/cerrar al pasar el ratón por el icono.
     raton: Hover,
+    /// Clics fuera del panel (lo cierran aunque nunca haya tenido el foco).
+    vigia: VigiaClics,
     /// Punto del icono de la bandeja (para colocar el panel).
     ancla: (i32, i32),
     velocimetro: Velocimetro,
@@ -72,6 +102,7 @@ impl Panel {
             cursor: (-1.0, -1.0),
             oculto_en: None,
             raton: Hover::default(),
+            vigia: VigiaClics::default(),
             ancla: (0, 0),
             velocimetro: Velocimetro::default(),
             ultima_muestra: None,
@@ -114,6 +145,23 @@ impl Panel {
         self.raton.sobre_icono()
     }
 
+    /// Mientras está abierto: un clic fuera del panel (y fuera del icono) lo cierra.
+    pub fn vigilar_clics(&mut self, icono: Option<Rect>) {
+        if !self.visible() {
+            return;
+        }
+        let mut r = unsafe { std::mem::zeroed() };
+        let mut p = POINT { x: 0, y: 0 };
+        unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect(self.ventana.hwnd() as HWND, &mut r);
+            windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut p);
+        }
+        let panel = Rect { x0: r.left, y0: r.top, x1: r.right, y1: r.bottom };
+        if self.vigia.actualizar(boton_raton_pulsado(), (p.x, p.y), panel, icono) {
+            self.ocultar();
+        }
+    }
+
     /// ¿Hay que despertar pronto el bucle por el paso del ratón?
     pub fn raton_pendiente(&self) -> bool {
         self.raton.pendiente()
@@ -144,7 +192,7 @@ impl Panel {
         if self.visible() && !self.raton.fijado() {
             // Abierto al pasar el ratón: el clic lo deja fijo (y con el foco).
             self.raton.fijar();
-            self.ventana.set_focus();
+            traer_al_frente(self.ventana.hwnd() as HWND);
         } else if self.visible() {
             self.ocultar();
         } else if self.oculto_en.is_some_and(|t| t.elapsed() < Duration::from_millis(400)) {
@@ -181,9 +229,10 @@ impl Panel {
         self.oscuro = panel_gdi::tema_oscuro();
         self.hover = None;
         self.pintar(estado);
+        self.vigia.reiniciar(boton_raton_pulsado());
         if activar {
             self.ventana.set_visible(true);
-            self.ventana.set_focus();
+            traer_al_frente(self.ventana.hwnd() as HWND);
         } else {
             // Al pasar el ratón no se roba el foco a lo que el usuario esté haciendo.
             use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_SHOWNOACTIVATE};

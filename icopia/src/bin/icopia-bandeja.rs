@@ -2,6 +2,7 @@
 use anyhow::Context;
 use icopia::bandeja::estado::{EstadoUi, EventoUi, Fase};
 use icopia::bandeja::panel::Principal;
+use icopia::bandeja::hover::Rect;
 use icopia::bandeja::panel_ventana::{Accion, Panel};
 use icopia::bandeja::hilo_motor::{self, Orden};
 use icopia::bandeja::{autoarranque, avisos, icono};
@@ -32,6 +33,23 @@ fn cursor_en_icono(t: &TrayIcon) -> bool {
     }
     let (x, y) = (r.position.x as i32, r.position.y as i32);
     p.x >= x && p.x < x + r.size.width as i32 && p.y >= y && p.y < y + r.size.height as i32
+}
+
+/// Menú contextual del icono. Para que se cierre al hacer clic fuera, su ventana dueña tiene que
+/// estar en primer plano antes de TrackPopupMenu, y después hay que enviarle WM_NULL
+/// (https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-trackpopupmenu).
+fn mostrar_menu(menu: &Menu, dueno: isize) {
+    use tray_icon::menu::ContextMenu;
+    use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetCursorPos, PostMessageW, TrackPopupMenu, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RIGHTBUTTON, WM_NULL};
+    let hwnd = dueno as windows_sys::Win32::Foundation::HWND;
+    unsafe {
+        let mut p = POINT { x: 0, y: 0 };
+        GetCursorPos(&mut p);
+        icopia::bandeja::panel_ventana::traer_al_frente(hwnd);
+        TrackPopupMenu(menu.hpopupmenu() as _, TPM_BOTTOMALIGN | TPM_LEFTALIGN | TPM_RIGHTBUTTON, p.x, p.y, 0, hwnd, std::ptr::null());
+        PostMessageW(hwnd, WM_NULL, 0, 0);
+    }
 }
 
 fn centro_de(r: &tray_icon::Rect) -> (i32, i32) {
@@ -184,7 +202,8 @@ fn main() {
     ])
     .expect("menú");
 
-    let mut menu_pendiente = Some(menu);
+    // El menú lo mostramos nosotros (no tray-icon) para poder cerrarlo bien al hacer clic fuera.
+    let mut dueno_menu: Option<tao::window::Window> = None;
     let mut tray: Option<TrayIcon> = None;
     let mut panel: Option<Panel> = None;
     let mut estado = EstadoUi::sin_datos(Fase::Inactiva);
@@ -218,7 +237,6 @@ fn main() {
             Event::NewEvents(StartCause::Init) => {
                 tray = Some(
                     TrayIconBuilder::new()
-                        .with_menu(Box::new(menu_pendiente.take().expect("menú")))
                         .with_menu_on_left_click(false)
                         .with_tooltip("icopia")
                         .with_icon(icono_de(icopia::bandeja::estado::Color::Gris))
@@ -226,6 +244,19 @@ fn main() {
                         .expect("icono de bandeja"),
                 );
                 panel = Some(Panel::nuevo(destino_ev));
+                let dueno = tao::window::WindowBuilder::new()
+                    .with_visible(false)
+                    .with_decorations(false)
+                    .with_title("icopia-menu")
+                    .build(destino_ev)
+                    .expect("ventana del menú");
+                {
+                    use tao::platform::windows::WindowExtWindows;
+                    use tray_icon::menu::ContextMenu;
+                    // Los WM_COMMAND del menú llegan a esta ventana y muda los convierte en MenuEvent.
+                    unsafe { menu.attach_menu_subclass_for_hwnd(dueno.hwnd()) };
+                }
+                dueno_menu = Some(dueno);
             }
             Event::UserEvent(Ev::Ui(EventoUi::Estado(e))) => {
                 let t = e.texto();
@@ -260,6 +291,15 @@ fn main() {
             Event::UserEvent(Ev::Bandeja(TrayIconEvent::Leave { .. })) => {
                 if let Some(p) = panel.as_mut() {
                     p.raton_en_icono(false, None);
+                }
+            }
+            Event::UserEvent(Ev::Bandeja(TrayIconEvent::Click { button: MouseButton::Right, button_state: MouseButtonState::Up, .. })) => {
+                if let Some(p) = panel.as_mut() {
+                    p.ocultar();
+                }
+                if let Some(d) = &dueno_menu {
+                    use tao::platform::windows::WindowExtWindows;
+                    mostrar_menu(&menu, d.hwnd());
                 }
             }
             Event::UserEvent(Ev::Bandeja(TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, rect, .. })) => {
@@ -310,6 +350,16 @@ fn main() {
                 p.raton_en_icono(false, None);
             }
             p.tick_raton(&estado);
+            p.vigilar_clics(tray.as_ref().and_then(|t| t.rect()).map(|r| Rect {
+                x0: r.position.x as i32,
+                y0: r.position.y as i32,
+                x1: r.position.x as i32 + r.size.width as i32,
+                y1: r.position.y as i32 + r.size.height as i32,
+            }));
+            if p.visible() {
+                // Para notar a tiempo un clic fuera del panel.
+                espera = espera.min(Duration::from_millis(50));
+            }
             if p.raton_pendiente() || p.raton_sobre_icono() {
                 espera = espera.min(Duration::from_millis(50));
             }

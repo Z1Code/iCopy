@@ -108,6 +108,41 @@ impl Hover {
     }
 }
 
+/// Rectángulo en píxeles de pantalla (x1/y1 excluidos).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rect {
+    pub x0: i32,
+    pub y0: i32,
+    pub x1: i32,
+    pub y1: i32,
+}
+
+impl Rect {
+    pub fn contiene(&self, (x, y): (i32, i32)) -> bool {
+        x >= self.x0 && x < self.x1 && y >= self.y0 && y < self.y1
+    }
+}
+
+/// Detecta un clic fuera del panel (para cerrarlo aunque nunca haya tenido el foco).
+/// Los clics en el icono de la bandeja no cuentan: esos los atiende el propio icono (alternar).
+#[derive(Debug, Default)]
+pub struct VigiaClics {
+    pulsado: bool,
+}
+
+impl VigiaClics {
+    /// Al abrir el panel: un botón que ya estaba pulsado no cuenta como clic nuevo.
+    pub fn reiniciar(&mut self, pulsado: bool) {
+        self.pulsado = pulsado;
+    }
+
+    /// pulsado: algún botón del ratón está abajo ahora. Devuelve 	rue si hay que cerrar.
+    pub fn actualizar(&mut self, pulsado: bool, cursor: (i32, i32), panel: Rect, icono: Option<Rect>) -> bool {
+        let nuevo = pulsado && !self.pulsado;
+        self.pulsado = pulsado;
+        nuevo && !panel.contiene(cursor) && !icono.is_some_and(|r| r.contiene(cursor))
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,5 +196,37 @@ mod tests {
         h.icono(true, 20.0);
         assert_eq!(h.tick(20.1), None);
         assert_eq!(h.tick(20.5), Some(Orden::Abrir));
+    }
+
+    #[test]
+    fn clic_fuera_cierra_y_dentro_o_en_el_icono_no() {
+        let panel = Rect { x0: 100, y0: 100, x1: 400, y1: 500 };
+        let icono = Some(Rect { x0: 450, y0: 520, x1: 480, y1: 550 });
+        let mut v = VigiaClics::default();
+        // Botón suelto: nada.
+        assert!(!v.actualizar(false, (10, 10), panel, icono));
+        // Pulsar dentro del panel no cierra; mantenerlo pulsado y salir tampoco (no es un clic nuevo).
+        assert!(!v.actualizar(true, (200, 200), panel, icono));
+        assert!(!v.actualizar(true, (10, 10), panel, icono));
+        assert!(!v.actualizar(false, (10, 10), panel, icono));
+        // Clic en el icono: lo atiende el icono (alterna), no esto.
+        assert!(!v.actualizar(true, (460, 530), panel, icono));
+        assert!(!v.actualizar(false, (460, 530), panel, icono));
+        // Clic fuera de ambos: cierra, una sola vez por pulsación.
+        assert!(v.actualizar(true, (10, 10), panel, icono));
+        assert!(!v.actualizar(true, (10, 10), panel, icono));
+        // Borde: x1/y1 quedan fuera.
+        assert!(!v.actualizar(false, (400, 200), panel, icono));
+        assert!(v.actualizar(true, (400, 200), panel, icono));
+    }
+
+    #[test]
+    fn el_boton_ya_pulsado_al_abrir_no_cuenta() {
+        let panel = Rect { x0: 0, y0: 0, x1: 10, y1: 10 };
+        let mut v = VigiaClics::default();
+        v.reiniciar(true);
+        assert!(!v.actualizar(true, (50, 50), panel, None));
+        assert!(!v.actualizar(false, (50, 50), panel, None));
+        assert!(v.actualizar(true, (50, 50), panel, None));
     }
 }
