@@ -25,7 +25,10 @@ fn instancia_unica() -> bool {
 }
 
 fn icono_de(color: icopia::bandeja::estado::Color) -> Icon {
-    let (rgba, w, h) = icono::rgba(color);
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSMICON};
+    // Tamaño de icono pequeño del sistema (16 px al 100 %, 24 al 150 %…): así se ve nítido.
+    let lado = unsafe { GetSystemMetrics(SM_CXSMICON) }.clamp(16, 64) as u32;
+    let (rgba, w, h) = icono::rgba(color, lado);
     Icon::from_rgba(rgba, w, h).expect("icono válido")
 }
 
