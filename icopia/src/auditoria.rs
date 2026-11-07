@@ -30,12 +30,35 @@ pub fn verificar_todo(
             Ok(_) => Some("el contenido cambió (SHA-256 distinto)".to_string()),
             Err(f) => Some(f.to_string()),
         };
-        if let Some(m) = motivo {
+        if let Some(mut m) = motivo {
             registro.lock().unwrap().marcar_para_redescarga(&p.asset_id, p.tipo, &m)?;
+            if let Err(e) = apartar_danado(destino, &p.ruta) {
+                m = format!("{m} (no se pudo apartar: {e})");
+            }
             r.malas.push((p.ruta.clone(), m));
         }
         r.revisadas += 1;
         avance(r.revisadas, total);
     }
     Ok(r)
+}
+
+/// Mueve un archivo dañado a `<destino>\.icopia\danados\<unix>_<nombre>` para que nunca se
+/// vuelva a adoptar como bueno. Si ya no existe, no hace nada.
+fn apartar_danado(destino: &Path, ruta_rel: &str) -> std::io::Result<()> {
+    let origen = destino.join(ruta_rel);
+    if !origen.exists() {
+        return Ok(());
+    }
+    let dir = destino.join(".icopia").join("danados");
+    std::fs::create_dir_all(&dir)?;
+    let nombre = origen.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "archivo".into());
+    let unix = chrono::Utc::now().timestamp();
+    let mut destino_final = dir.join(format!("{unix}_{nombre}"));
+    let mut n = 2;
+    while destino_final.exists() {
+        destino_final = dir.join(format!("{unix}_{n}_{nombre}"));
+        n += 1;
+    }
+    std::fs::rename(&origen, &destino_final)
 }

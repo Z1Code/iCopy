@@ -55,6 +55,7 @@ pub enum ErrorParte {
     Verificacion(FalloVerificacion),
     Ruta(String),
     Disco(String),
+    Registro(String),
     Cancelada,
 }
 
@@ -65,6 +66,7 @@ impl fmt::Display for ErrorParte {
             ErrorParte::Verificacion(e) => write!(f, "verificación: {e}"),
             ErrorParte::Ruta(m) => write!(f, "ruta: {m}"),
             ErrorParte::Disco(m) => write!(f, "disco: {m}"),
+            ErrorParte::Registro(m) => write!(f, "registro: {m}"),
             ErrorParte::Cancelada => write!(f, "cancelada"),
         }
     }
@@ -216,10 +218,15 @@ fn procesar_parte(destino: &Path, registro: &Mutex<Registro>, http: &Client, t: 
     if let Some(p) = final_.parent() {
         std::fs::create_dir_all(p).map_err(|e| ErrorParte::Disco(e.to_string()))?;
     }
-    // Recuperación tras un corte entre "renombrar" y "anotar como verificado".
-    if final_.exists() {
-        if let Ok(sha) = verificar::verificar_archivo(&final_, t.tamano, &t.extension) {
-            return Ok(sha);
+    // Recuperación tras un corte entre "renombrar" y "anotar como verificado": solo se adopta
+    // el archivo final si es exactamente el `.part` que se verificó (mismo SHA-256 anotado).
+    if let Some(esperado) = &t.sha_pendiente {
+        if final_.exists() {
+            if let Ok(sha) = verificar::verificar_archivo(&final_, t.tamano, &t.extension) {
+                if &sha == esperado {
+                    return Ok(sha);
+                }
+            }
         }
     }
     let part = descarga::ruta_part(&final_);
@@ -229,6 +236,11 @@ fn procesar_parte(destino: &Path, registro: &Mutex<Registro>, http: &Client, t: 
     })?;
     match verificar::verificar_archivo(&part, t.tamano, &t.extension) {
         Ok(sha) => {
+            registro
+                .lock()
+                .unwrap()
+                .anotar_sha_pendiente(&t.asset_id, t.tipo, &sha)
+                .map_err(|e| ErrorParte::Registro(e.to_string()))?;
             std::fs::rename(&part, &final_).map_err(|e| ErrorParte::Disco(e.to_string()))?;
             Ok(sha)
         }

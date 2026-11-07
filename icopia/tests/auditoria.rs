@@ -40,3 +40,52 @@ fn detecta_archivos_danados_y_ausentes_y_los_reprograma() {
     assert_eq!(reg.lock().unwrap().resumen().unwrap().verificadas, 1);
     assert_eq!(reg.lock().unwrap().partes_pendientes(motor::ahora(), None).unwrap().len(), 2);
 }
+
+#[test]
+fn archivo_danado_se_vuelve_a_descargar_y_no_se_readopta() {
+    let b = jpeg(400);
+    let s = servidor(vec![("/b", Comportamiento::Servir(b.clone()))]);
+    let f8 = "2026-08-10T19:37:18-04:00";
+    let mut f = FuenteFalsa { assets: vec![asset("A2", "IMG_B", f8, "PrimarySync", vec![parte(TipoParte::Original, &b, s.url("/b"), "JPG")])], ..Default::default() };
+    let d = tempfile::tempdir().unwrap();
+    let reg = Mutex::new(Registro::en_memoria().unwrap());
+    let op = OpcionesRonda { concurrencia: 1, mes: None };
+    motor::ejecutar_ronda(d.path(), &reg, &mut f, &descarga::cliente(), &op, &AtomicBool::new(false), &|_: Avance| {}).unwrap();
+    assert_eq!(s.total_peticiones(), 1);
+    let ruta = d.path().join(r"2026\2026-08\IMG_B.JPG");
+    let mut danado = b.clone();
+    danado[10] ^= 0xFF; // mismo tamaño, estructura intacta
+    std::fs::write(&ruta, &danado).unwrap();
+
+    let r = auditoria::verificar_todo(d.path(), &reg, &AtomicBool::new(false), &|_, _| {}).unwrap();
+    assert_eq!(r.malas.len(), 1);
+    let apartados: Vec<_> = std::fs::read_dir(d.path().join(r".icopia\danados")).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+    assert_eq!(apartados.len(), 1);
+    assert!(apartados[0].ends_with("_IMG_B.JPG"), "{apartados:?}");
+
+    let r2 = motor::ejecutar_ronda(d.path(), &reg, &mut f, &descarga::cliente(), &op, &AtomicBool::new(false), &|_: Avance| {}).unwrap();
+    assert_eq!(r2.verificadas, 1);
+    assert_eq!(s.total_peticiones(), 2, "debe volver a descargarse del servidor");
+    assert_eq!(std::fs::read(&ruta).unwrap(), b);
+}
+
+#[test]
+fn archivo_danado_no_apartado_tampoco_se_readopta() {
+    // Aunque el archivo dañado siga en su sitio (p. ej. no se pudo apartar), no se acepta.
+    let b = jpeg(400);
+    let s = servidor(vec![("/b", Comportamiento::Servir(b.clone()))]);
+    let f8 = "2026-08-10T19:37:18-04:00";
+    let mut f = FuenteFalsa { assets: vec![asset("A2", "IMG_B", f8, "PrimarySync", vec![parte(TipoParte::Original, &b, s.url("/b"), "JPG")])], ..Default::default() };
+    let d = tempfile::tempdir().unwrap();
+    let reg = Mutex::new(Registro::en_memoria().unwrap());
+    let op = OpcionesRonda { concurrencia: 1, mes: None };
+    motor::ejecutar_ronda(d.path(), &reg, &mut f, &descarga::cliente(), &op, &AtomicBool::new(false), &|_: Avance| {}).unwrap();
+    let ruta = d.path().join(r"2026\2026-08\IMG_B.JPG");
+    let mut danado = b.clone();
+    danado[10] ^= 0xFF;
+    std::fs::write(&ruta, &danado).unwrap();
+    reg.lock().unwrap().marcar_para_redescarga("A2", TipoParte::Original, "prueba").unwrap();
+    motor::ejecutar_ronda(d.path(), &reg, &mut f, &descarga::cliente(), &op, &AtomicBool::new(false), &|_: Avance| {}).unwrap();
+    assert_eq!(s.total_peticiones(), 2);
+    assert_eq!(std::fs::read(&ruta).unwrap(), b);
+}

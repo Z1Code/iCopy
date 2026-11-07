@@ -20,6 +20,8 @@ pub struct TrabajoParte {
     pub tamano: u64,
     pub url: String,
     pub ruta: Option<String>,
+    /// SHA-256 del `.part` verificado justo antes de renombrarlo; solo con él se adopta un archivo final ya existente.
+    pub sha_pendiente: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -79,6 +81,7 @@ CREATE TABLE IF NOT EXISTS partes(
   intentos INTEGER NOT NULL DEFAULT 0,
   proximo_intento INTEGER NOT NULL DEFAULT 0,
   ultimo_error TEXT,
+  sha_pendiente TEXT,
   PRIMARY KEY(asset_id, tipo)
 );
 CREATE INDEX IF NOT EXISTS partes_estado ON partes(estado, proximo_intento);
@@ -94,6 +97,7 @@ ON CONFLICT(asset_id, tipo) DO UPDATE SET
   sha256 = CASE WHEN partes.tamano <> excluded.tamano OR partes.extension <> excluded.extension THEN NULL ELSE partes.sha256 END,
   intentos = CASE WHEN partes.tamano <> excluded.tamano OR partes.extension <> excluded.extension THEN 0 ELSE partes.intentos END,
   proximo_intento = CASE WHEN partes.tamano <> excluded.tamano OR partes.extension <> excluded.extension THEN 0 ELSE partes.proximo_intento END,
+  sha_pendiente = CASE WHEN partes.tamano <> excluded.tamano OR partes.extension <> excluded.extension THEN NULL ELSE partes.sha_pendiente END,
   ruta = CASE WHEN partes.extension <> excluded.extension THEN NULL ELSE partes.ruta END,
   ruta_clave = CASE WHEN partes.extension <> excluded.extension THEN NULL ELSE partes.ruta_clave END,
   tamano = excluded.tamano,
@@ -110,6 +114,17 @@ pub fn espera_reintento(intentos: u32) -> (&'static str, i64) {
     } else {
         ("pendiente", ESPERAS[(intentos.max(1) - 1) as usize])
     }
+}
+
+/// Migración: añade la columna si una base de datos anterior no la tiene.
+fn asegurar_columna(con: &Connection, tabla: &str, columna: &str, definicion: &str) -> Result<()> {
+    let existe: bool = con
+        .prepare(&format!("SELECT 1 FROM pragma_table_info('{tabla}') WHERE name = ?1"))?
+        .exists(params![columna])?;
+    if !existe {
+        con.execute_batch(&format!("ALTER TABLE {tabla} ADD COLUMN {columna} {definicion}"))?;
+    }
+    Ok(())
 }
 
 fn tipo_de(s: String) -> TipoParte {
@@ -135,6 +150,7 @@ impl Registro {
 
     fn con_esquema(con: Connection) -> Result<Registro> {
         con.execute_batch(ESQUEMA)?;
+        asegurar_columna(&con, "partes", "sha_pendiente", "TEXT")?;
         Ok(Registro { con })
     }
 
@@ -174,7 +190,7 @@ impl Registro {
     /// Partes por copiar de assets presentes en el último listado, de la más antigua a la más nueva.
     pub fn partes_pendientes(&self, ahora: i64, mes: Option<&str>) -> Result<Vec<TrabajoParte>> {
         let sql = format!(
-            "SELECT p.asset_id, p.tipo, a.nombre_base, a.fecha, p.extension, p.tamano, p.url, p.ruta
+            "SELECT p.asset_id, p.tipo, a.nombre_base, a.fecha, p.extension, p.tamano, p.url, p.ruta, p.sha_pendiente
              FROM partes p JOIN assets a ON a.id = p.asset_id
              WHERE p.estado <> 'verificado' AND p.proximo_intento <= ?1 AND a.borrado_icloud IS NULL
                AND {EN_ULTIMA_LISTA} AND (?2 IS NULL OR a.mes = ?2)
@@ -191,6 +207,7 @@ impl Registro {
                 tamano: r.get::<_, i64>(5)? as u64,
                 url: r.get(6)?,
                 ruta: r.get(7)?,
+                sha_pendiente: r.get(8)?,
             })
         })?;
         Ok(filas.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -228,8 +245,18 @@ impl Registro {
 
     pub fn marcar_verificada(&mut self, asset_id: &str, tipo: TipoParte, sha256: &str) -> Result<()> {
         self.con.execute(
-            "UPDATE partes SET estado = 'verificado', sha256 = ?3, intentos = 0, proximo_intento = 0, ultimo_error = NULL
+            "UPDATE partes SET estado = 'verificado', sha256 = ?3, intentos = 0, proximo_intento = 0, ultimo_error = NULL,
+               sha_pendiente = NULL
              WHERE asset_id = ?1 AND tipo = ?2",
+            params![asset_id, tipo.como_str(), sha256],
+        )?;
+        Ok(())
+    }
+
+    /// Se anota antes de renombrar el `.part` verificado al nombre final.
+    pub fn anotar_sha_pendiente(&mut self, asset_id: &str, tipo: TipoParte, sha256: &str) -> Result<()> {
+        self.con.execute(
+            "UPDATE partes SET sha_pendiente = ?3 WHERE asset_id = ?1 AND tipo = ?2",
             params![asset_id, tipo.como_str(), sha256],
         )?;
         Ok(())
@@ -252,7 +279,8 @@ impl Registro {
 
     pub fn marcar_para_redescarga(&mut self, asset_id: &str, tipo: TipoParte, motivo: &str) -> Result<()> {
         self.con.execute(
-            "UPDATE partes SET estado = 'pendiente', sha256 = NULL, intentos = 0, proximo_intento = 0, ultimo_error = ?3
+            "UPDATE partes SET estado = 'pendiente', sha256 = NULL, intentos = 0, proximo_intento = 0, ultimo_error = ?3,
+               sha_pendiente = NULL
              WHERE asset_id = ?1 AND tipo = ?2",
             params![asset_id, tipo.como_str(), motivo],
         )?;
@@ -508,6 +536,27 @@ mod tests {
         assert_eq!(no_listos, 1); // A3: le falta la Live
         r.marcar_borrado("A1", "2026-11-07T10:00:00-05:00").unwrap();
         assert!(r.candidatos_liberar(200, limite).unwrap().0.is_empty());
+    }
+
+    #[test]
+    fn migra_base_antigua_sin_sha_pendiente() {
+        let con = Connection::open_in_memory().unwrap();
+        con.execute_batch(&ESQUEMA.replace("  sha_pendiente TEXT,
+", "")).unwrap();
+        assert!(con.prepare("SELECT sha_pendiente FROM partes").is_err());
+        let r = Registro::con_esquema(con).unwrap();
+        assert!(r.con.prepare("SELECT sha_pendiente FROM partes").is_ok());
+    }
+
+    #[test]
+    fn sha_pendiente_se_limpia_al_verificar() {
+        let mut r = Registro::en_memoria().unwrap();
+        listar(&mut r, &[asset("A1", "PrimarySync", AGO, &[(Original, 10)])], 100);
+        r.anotar_sha_pendiente("A1", Original, "abc").unwrap();
+        assert_eq!(r.partes_pendientes(1000, None).unwrap()[0].sha_pendiente.as_deref(), Some("abc"));
+        dar_por_copiado(&mut r, "A1", Original);
+        r.marcar_para_redescarga("A1", Original, "x").unwrap();
+        assert_eq!(r.partes_pendientes(1000, None).unwrap()[0].sha_pendiente, None);
     }
 
     #[test]

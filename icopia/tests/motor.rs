@@ -130,9 +130,26 @@ fn archivo_final_existente_se_adopta_sin_descargar() {
     let d = tempfile::tempdir().unwrap();
     let reg = nuevo_registro();
     ronda(d.path(), &reg, &mut f);
+    // Simula un corte entre renombrar el .part verificado y anotarlo como verificado.
+    let sha = reg.lock().unwrap().partes_verificadas().unwrap()[0].sha256.clone();
     reg.lock().unwrap().marcar_para_redescarga("A1", TipoParte::Original, "prueba").unwrap();
+    reg.lock().unwrap().anotar_sha_pendiente("A1", TipoParte::Original, &sha).unwrap();
     assert_eq!(ronda(d.path(), &reg, &mut f).verificadas, 1);
     assert_eq!(s.total_peticiones(), 1);
+}
+
+#[test]
+fn archivo_final_con_sha_pendiente_distinto_no_se_adopta() {
+    let j = jpeg(500);
+    let s = servidor(vec![("/j", Comportamiento::Servir(j.clone()))]);
+    let mut f = FuenteFalsa { assets: vec![asset("A1", "IMG_0001", AGO, "PrimarySync", vec![parte(TipoParte::Original, &j, s.url("/j"), "JPG")])], ..Default::default() };
+    let d = tempfile::tempdir().unwrap();
+    let reg = nuevo_registro();
+    ronda(d.path(), &reg, &mut f);
+    reg.lock().unwrap().marcar_para_redescarga("A1", TipoParte::Original, "prueba").unwrap();
+    reg.lock().unwrap().anotar_sha_pendiente("A1", TipoParte::Original, "otro").unwrap();
+    assert_eq!(ronda(d.path(), &reg, &mut f).verificadas, 1);
+    assert_eq!(s.total_peticiones(), 2);
 }
 
 #[test]
