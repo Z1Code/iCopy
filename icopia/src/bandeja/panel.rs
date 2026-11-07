@@ -195,6 +195,48 @@ pub fn principal(e: &EstadoUi) -> Principal {
     }
 }
 
+/// Medidas que se toman en la interfaz (no vienen del motor).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Medidas {
+    /// Velocidad de descarga actual (ventana móvil).
+    pub bytes_por_seg: Option<f64>,
+    /// Ritmo del listado de iCloud (ventana móvil).
+    pub elementos_por_seg: Option<f64>,
+    /// Velocidad media de la última ronda que descargó algo.
+    pub media_ultima_ronda: Option<f64>,
+}
+
+/// Velocidad media de una ronda: bytes descargados entre que empieza y termina.
+#[derive(Debug, Default)]
+pub struct MediaRonda {
+    inicio: Option<(f64, u64)>,
+    media: Option<f64>,
+}
+
+impl MediaRonda {
+    pub fn empezar(&mut self, t: f64, bytes: u64) {
+        self.inicio = Some((t, bytes));
+    }
+
+    /// Al acabar la ronda; si no descargó nada, se conserva la media anterior.
+    pub fn terminar(&mut self, t: f64, bytes: u64) {
+        if let Some((t0, b0)) = self.inicio.take() {
+            if bytes > b0 && t > t0 {
+                self.media = Some((bytes - b0) as f64 / (t - t0));
+            }
+        }
+    }
+
+    pub fn media(&self) -> Option<f64> {
+        self.media
+    }
+}
+
+/// "~1.250 elementos/min"
+pub fn ritmo(elementos_por_seg: f64) -> String {
+    format!("~{} elementos/min", miles((elementos_por_seg * 60.0).round() as u64))
+}
+
 /// Todo lo que muestra el panel, ya en texto.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Vista {
@@ -207,6 +249,8 @@ pub struct Vista {
     /// Totales de toda la fototeca.
     pub linea_total: String,
     pub ahora: String,
+    /// "Velocidad", "Ritmo" (listando) o "Velocidad media" (en reposo).
+    pub etiqueta_velocidad: &'static str,
     pub velocidad: String,
     pub listado: String,
     pub errores: String,
@@ -218,10 +262,11 @@ fn plural(n: u64, uno: &str, varios: &str) -> String {
 }
 
 /// Se recalcula entera en cada refresco a partir del estado vivo (nada se guarda entre llamadas).
-pub fn vista(e: &EstadoUi, bytes_por_seg: Option<f64>, ahora_unix: i64) -> Vista {
+pub fn vista(e: &EstadoUi, m: Medidas, ahora_unix: i64) -> Vista {
     let d = &e.detalle;
     let ind = indicador(e);
-    let vel = bytes_por_seg.filter(|v| e.trabajando() && *v > 0.0);
+    let vel = m.bytes_por_seg.filter(|v| e.trabajando() && *v > 0.0);
+    let ritmo_listado = m.elementos_por_seg.filter(|v| *v > 0.0);
     let titulo = match &e.fase {
         Fase::Listando { .. } if d.renovando_enlaces => "Renovando enlaces de iCloud…".to_string(),
         Fase::Listando { vistos: 0 } => "Revisando iCloud…".to_string(),
@@ -257,7 +302,19 @@ pub fn vista(e: &EstadoUi, bytes_por_seg: Option<f64>, ahora_unix: i64) -> Vista
         }
     };
     let (fraccion, linea) = match &e.fase {
-        Fase::Listando { .. } => (None, "Buscando fotos y vídeos nuevos".to_string()),
+        // Con un listado anterior, su tamaño sirve de total previsto y la barra avanza.
+        Fase::Listando { vistos } => match d.listado_previsto.filter(|&p| p > 0) {
+            Some(p) => {
+                let v = *vistos as u64;
+                let mut l = format!("{} de ~{}", miles(v), miles(p));
+                if let (Some(r), true) = (ritmo_listado, v < p) {
+                    l.push_str(" · ");
+                    l.push_str(&restante(((p - v) as f64 / r) as u64));
+                }
+                (Some(v as f64 / p as f64), l)
+            }
+            None => (None, "Buscando fotos y vídeos nuevos".to_string()),
+        },
         Fase::Copiando { hechas, total } => match &d.ronda {
             Some(r) if r.bytes > 0 => {
                 let hecho = d.bytes_verificados.saturating_sub(r.bytes_base).min(r.bytes);
@@ -286,9 +343,29 @@ pub fn vista(e: &EstadoUi, bytes_por_seg: Option<f64>, ahora_unix: i64) -> Vista
     } else {
         "Fototeca: aún vacía".into()
     };
+    let pendientes = e.total.saturating_sub(e.verificadas);
     let ahora = match (&e.fase, &d.actual) {
+        (Fase::Listando { .. }, _) if d.renovando_enlaces => "Renovando enlaces de iCloud".to_string(),
+        (Fase::Listando { .. }, _) => "Consultando tu fototeca en iCloud".into(),
         (Fase::Copiando { .. }, Some(a)) => a.clone(),
-        _ => "—".into(),
+        (Fase::Copiando { .. }, None) => "Preparando la copia".into(),
+        (Fase::Verificando { .. }, _) => "Comprobando los archivos copiados".into(),
+        (Fase::Inactiva, _) if e.total == 0 => "Esperando la primera revisión".into(),
+        (Fase::Inactiva, _) if pendientes == 0 => "Nada pendiente".into(),
+        (Fase::Inactiva | Fase::Pausada, _) if pendientes > 0 => plural(pendientes, "archivo pendiente", "archivos pendientes"),
+        (Fase::Pausada, _) => "Nada pendiente".into(),
+        (Fase::SesionCaducada, _) => "Esperando a que inicies sesión".into(),
+        (Fase::SinEspacio, _) => "Libera espacio en el disco destino".into(),
+        (Fase::DestinoAusente, _) => "Conecta el disco o elige otra carpeta".into(),
+        (Fase::SinDestino, _) => "Elige la carpeta en el menú del icono".into(),
+        (Fase::Error(_), _) => "Se reintentará en la próxima ronda".into(),
+        (Fase::Inactiva, _) => "Nada pendiente".into(),
+    };
+    let (etiqueta_velocidad, velocidad_txt) = match &e.fase {
+        Fase::Listando { .. } => ("Ritmo", ritmo_listado.map(ritmo).unwrap_or_else(|| "midiendo…".into())),
+        Fase::Copiando { .. } => ("Velocidad", vel.map(velocidad).unwrap_or_else(|| "midiendo…".into())),
+        Fase::Verificando { .. } => ("Velocidad", "sin descargas (solo comprueba)".into()),
+        _ => ("Velocidad media", m.media_ultima_ronda.map(|v| format!("{} (última ronda)", velocidad(v))).unwrap_or_else(|| "sin descargas recientes".into())),
     };
     Vista {
         indicador: ind,
@@ -297,7 +374,8 @@ pub fn vista(e: &EstadoUi, bytes_por_seg: Option<f64>, ahora_unix: i64) -> Vista
         linea,
         linea_total,
         ahora,
-        velocidad: vel.map(velocidad).unwrap_or_else(|| "—".into()),
+        etiqueta_velocidad,
+        velocidad: velocidad_txt,
         listado: d.ultimo_listado.map(|t| hace(ahora_unix - t)).unwrap_or_else(|| "nunca".into()),
         errores: miles(d.con_error),
         principal: principal(e),
@@ -362,7 +440,7 @@ mod tests {
         const GB: u64 = 1_000_000_000;
         // Listando: barra indeterminada y contador de vistos.
         let mut e = EstadoUi::con_progreso(Fase::Listando { vistos: 1200 }, &progreso(0, 0, 0, 0));
-        let v = vista(&e, None, 1000);
+        let v = vista(&e, Medidas::default(), 1000);
         assert_eq!((v.titulo.as_str(), v.fraccion, v.principal), ("Revisando iCloud… (1.200 vistos)", None, Principal::Pausar));
         assert_eq!(v.linea_total, "Fototeca: aún vacía");
         assert_eq!(v.indicador, Indicador::EnVivo);
@@ -371,7 +449,7 @@ mod tests {
         e.actualizar_progreso(&progreso(108, 210, 108 * GB, 210 * GB));
         e.detalle.ronda = Some(Ronda { archivos: 210, bytes: 210 * GB, bytes_base: 0 });
         e.detalle.actual = Some("IMG_1 (original)".into());
-        let v = vista(&e, Some(29_310_000.0), 1300);
+        let v = vista(&e, Medidas { bytes_por_seg: Some(29_310_000.0), ..Medidas::default() }, 1300);
         assert_eq!(v.titulo, "Copiando 210 nuevos");
         assert_eq!(v.linea, "51 % · 108 de 210 GB · ~58 min restantes");
         assert_eq!(v.linea_total, "Fototeca: 108 de 210 archivos · 108 de 210 GB");
@@ -379,8 +457,8 @@ mod tests {
         // Reposo: al día, con la última y la próxima revisión; botón "Revisar ahora".
         let mut e = EstadoUi::con_progreso(Fase::Inactiva, &progreso(210, 210, 210 * GB, 210 * GB));
         e.detalle.proxima = Some(1000 + 4 * 3600);
-        let v = vista(&e, Some(5.0), 1000 + 5 * 60);
-        assert_eq!((v.titulo.as_str(), v.indicador, v.velocidad.as_str()), ("Al día", Indicador::AlDia, "—"));
+        let v = vista(&e, Medidas { bytes_por_seg: Some(5.0), ..Medidas::default() }, 1000 + 5 * 60);
+        assert_eq!((v.titulo.as_str(), v.indicador, v.velocidad.as_str()), ("Al día", Indicador::AlDia, "sin descargas recientes"));
         assert_eq!(v.linea, "Última revisión hace 5 min · próxima en ~3 h 55 min");
         assert_eq!((v.fraccion, v.principal), (Some(1.0), Principal::RevisarAhora));
     }
@@ -395,7 +473,7 @@ mod tests {
         let mut e = EstadoUi::con_progreso(Fase::Copiando { hechas: 5, total: 20 }, &progreso(1005, 1020, 5020 * MB, 5080 * MB));
         assert!(!es_nueva_ronda(&listando, &e));
         e.detalle.ronda = Some(Ronda { archivos: 20, bytes: 80 * MB, bytes_base: 5000 * MB });
-        let v = vista(&e, None, 2000);
+        let v = vista(&e, Medidas::default(), 2000);
         assert_eq!(v.titulo, "Copiando 20 nuevos");
         // La ronda va por el 25 % (no el 99,9 % de toda la fototeca)...
         assert_eq!(v.fraccion, Some(0.25));
@@ -419,15 +497,76 @@ mod tests {
         assert_eq!(indicador(&con(Fase::Error("x".into()))), Indicador::Error);
         assert_eq!(principal(&con(Fase::Verificando { hechas: 1, total: 2 })), Principal::Pausar);
         let sin = EstadoUi { detalle: Detalle { ultimo_listado: None, ..Detalle::default() }, ..con(Fase::Inactiva) };
-        assert_eq!(vista(&sin, None, 0).linea, "Todavía no se ha revisado iCloud");
+        assert_eq!(vista(&sin, Medidas::default(), 0).linea, "Todavía no se ha revisado iCloud");
     }
 
     #[test]
     fn relistado_tras_caducar_enlaces_se_explica() {
         let mut e = EstadoUi::con_progreso(Fase::Listando { vistos: 300 }, &progreso(1, 2, 1, 2));
         e.detalle.renovando_enlaces = true;
-        let v = vista(&e, None, 1000);
+        let v = vista(&e, Medidas::default(), 1000);
         assert_eq!((v.titulo.as_str(), v.indicador), ("Renovando enlaces de iCloud…", Indicador::EnVivo));
         assert_eq!(e.texto(), "Renovando enlaces de iCloud… (300 vistos)");
+    }
+
+    #[test]
+    fn listando_con_listado_anterior_da_barra_ritmo_y_tiempo() {
+        let mut e = EstadoUi::con_progreso(Fase::Listando { vistos: 3225 }, &progreso(19_000, 19_570, 1, 2));
+        e.detalle.listado_previsto = Some(19_570);
+        let m = Medidas { elementos_por_seg: Some(1000.0 / 60.0 * 1.0), ..Medidas::default() };
+        let v = vista(&e, m, 1000);
+        assert_eq!(v.ahora, "Consultando tu fototeca en iCloud");
+        assert_eq!((v.etiqueta_velocidad, v.velocidad.as_str()), ("Ritmo", "~1.000 elementos/min"));
+        assert_eq!(v.linea, "3.225 de ~19.570 · ~17 min restantes");
+        assert!((v.fraccion.unwrap() - 3225.0 / 19570.0).abs() < 1e-9);
+        // Sin ritmo medido todavía.
+        let v = vista(&e, Medidas::default(), 1000);
+        assert_eq!((v.linea.as_str(), v.velocidad.as_str()), ("3.225 de ~19.570", "midiendo…"));
+        // Primer listado (sin anterior): barra indeterminada.
+        e.detalle.listado_previsto = None;
+        let v = vista(&e, m, 1000);
+        assert_eq!((v.fraccion, v.linea.as_str()), (None, "Buscando fotos y vídeos nuevos"));
+        // Renovando enlaces.
+        e.detalle.renovando_enlaces = true;
+        assert_eq!(vista(&e, m, 1000).ahora, "Renovando enlaces de iCloud");
+    }
+
+    #[test]
+    fn en_reposo_las_filas_tienen_contenido() {
+        let al_dia = EstadoUi::con_progreso(Fase::Inactiva, &progreso(10, 10, 10, 10));
+        let v = vista(&al_dia, Medidas::default(), 1000);
+        assert_eq!((v.ahora.as_str(), v.etiqueta_velocidad, v.velocidad.as_str()), ("Nada pendiente", "Velocidad media", "sin descargas recientes"));
+        let m = Medidas { media_ultima_ronda: Some(12_300_000.0), ..Medidas::default() };
+        assert_eq!(vista(&al_dia, m, 1000).velocidad, "12,3 MB/s (última ronda)");
+        let espera = EstadoUi::con_progreso(Fase::Inactiva, &progreso(7, 10, 7, 10));
+        assert_eq!(vista(&espera, m, 1000).ahora, "3 archivos pendientes");
+        let pausa = EstadoUi::con_progreso(Fase::Pausada, &progreso(9, 10, 9, 10));
+        assert_eq!(vista(&pausa, m, 1000).ahora, "1 archivo pendiente");
+        let vacio = EstadoUi::con_progreso(Fase::Inactiva, &progreso(0, 0, 0, 0));
+        assert_eq!(vista(&vacio, m, 1000).ahora, "Esperando la primera revisión");
+        for f in [Fase::SesionCaducada, Fase::SinEspacio, Fase::DestinoAusente, Fase::SinDestino, Fase::Error("x".into())] {
+            let v = vista(&EstadoUi::con_progreso(f, &progreso(1, 2, 1, 2)), m, 1000);
+            assert!(!v.ahora.contains('—') && !v.velocidad.contains('—'), "{v:?}");
+        }
+        // Copiando sin medida aún: "midiendo…", nunca una raya.
+        let c = EstadoUi::con_progreso(Fase::Copiando { hechas: 0, total: 3 }, &progreso(0, 3, 0, 3));
+        let v = vista(&c, Medidas::default(), 1000);
+        assert_eq!((v.ahora.as_str(), v.velocidad.as_str()), ("Preparando la copia", "midiendo…"));
+    }
+
+    #[test]
+    fn media_de_la_ronda() {
+        let mut m = MediaRonda::default();
+        assert_eq!(m.media(), None);
+        m.empezar(10.0, 1_000);
+        m.terminar(20.0, 101_000);
+        assert_eq!(m.media(), Some(10_000.0));
+        // Una ronda sin descargas no borra la media anterior.
+        m.empezar(30.0, 101_000);
+        m.terminar(40.0, 101_000);
+        assert_eq!(m.media(), Some(10_000.0));
+        // Terminar sin haber empezado no hace nada.
+        m.terminar(50.0, 999_999);
+        assert_eq!(m.media(), Some(10_000.0));
     }
 }

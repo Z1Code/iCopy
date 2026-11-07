@@ -25,16 +25,6 @@ enum Ev {
     Progreso(icopia::registro::Progreso),
 }
 
-fn cursor_en_icono(t: &TrayIcon) -> bool {
-    let Some(r) = t.rect() else { return false };
-    let mut p = windows_sys::Win32::Foundation::POINT { x: 0, y: 0 };
-    if unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut p) } == 0 {
-        return false;
-    }
-    let (x, y) = (r.position.x as i32, r.position.y as i32);
-    p.x >= x && p.x < x + r.size.width as i32 && p.y >= y && p.y < y + r.size.height as i32
-}
-
 /// Menú contextual del icono. Para que se cierre al hacer clic fuera, su ventana dueña tiene que
 /// estar en primer plano antes de TrackPopupMenu, y después hay que enviarle WM_NULL
 /// (https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-trackpopupmenu).
@@ -285,12 +275,12 @@ fn main() {
             Event::UserEvent(Ev::Ui(EventoUi::Aviso { titulo, texto })) => avisos::mostrar(&titulo, &texto),
             Event::UserEvent(Ev::Bandeja(TrayIconEvent::Enter { rect, .. } | TrayIconEvent::Move { rect, .. })) => {
                 if let Some(p) = panel.as_mut() {
-                    p.raton_en_icono(true, Some(centro_de(&rect)));
+                    p.aviso_icono(centro_de(&rect));
                 }
             }
             Event::UserEvent(Ev::Bandeja(TrayIconEvent::Leave { .. })) => {
                 if let Some(p) = panel.as_mut() {
-                    p.raton_en_icono(false, None);
+                    p.salio_icono();
                 }
             }
             Event::UserEvent(Ev::Bandeja(TrayIconEvent::Click { button: MouseButton::Right, button_state: MouseButtonState::Up, .. })) => {
@@ -345,22 +335,13 @@ fn main() {
             _ => {}
         }
         if let Some(p) = panel.as_mut() {
-            // tray-icon no siempre avisa de que el ratón salió del icono: se comprueba aquí.
-            if p.raton_sobre_icono() && !tray.as_ref().is_some_and(cursor_en_icono) {
-                p.raton_en_icono(false, None);
-            }
-            p.tick_raton(&estado);
-            p.vigilar_clics(tray.as_ref().and_then(|t| t.rect()).map(|r| Rect {
+            p.vigilar_raton(&estado, tray.as_ref().and_then(|t| t.rect()).map(|r| Rect {
                 x0: r.position.x as i32,
                 y0: r.position.y as i32,
                 x1: r.position.x as i32 + r.size.width as i32,
                 y1: r.position.y as i32 + r.size.height as i32,
             }));
-            if p.visible() {
-                // Para notar a tiempo un clic fuera del panel.
-                espera = espera.min(Duration::from_millis(50));
-            }
-            if p.raton_pendiente() || p.raton_sobre_icono() {
+            if p.raton_pendiente() {
                 espera = espera.min(Duration::from_millis(50));
             }
             // Con el panel abierto no se muestra el tooltip (se solaparían).

@@ -188,6 +188,8 @@ fn una_ronda(
     let inicio = Instant::now() - Duration::from_secs(10);
     let ritmo = Mutex::new((inicio, inicio, registro.lock().unwrap().progreso().unwrap_or_default(), None::<Ronda>));
     let renovando = std::mem::take(renovar);
+    // Lo que trajo el último listado completo: total previsto mientras se vuelve a listar.
+    let previsto = registro.lock().unwrap().assets_ultimo_listado().ok().flatten();
     let avance = |a: Avance| {
         let (fase, actual, ultimo) = match a {
             Avance::Listando { vistos } => (Fase::Listando { vistos }, None, false),
@@ -218,6 +220,9 @@ fn una_ronda(
         e.detalle.actual = actual;
         e.detalle.ronda = r.3.clone();
         e.detalle.renovando_enlaces = renovando && matches!(e.fase, Fase::Listando { .. });
+        if matches!(e.fase, Fase::Listando { .. }) {
+            e.detalle.listado_previsto = previsto;
+        }
         drop(r);
         emitir(EventoUi::Estado(e));
     };

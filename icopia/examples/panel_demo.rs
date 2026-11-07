@@ -1,7 +1,7 @@
 //! Renderiza el panel de progreso de la bandeja en varios estados (claro y oscuro) a un PNG,
 //! para revisarlo sin abrir la bandeja. Uso: `cargo run --example panel_demo -- salida.png [escala]`
 use icopia::bandeja::estado::{Detalle, EstadoUi, Fase, Ronda};
-use icopia::bandeja::panel::vista;
+use icopia::bandeja::panel::{vista, Medidas};
 use icopia::bandeja::panel_gdi::{self, Boton, Lienzo};
 
 fn main() {
@@ -17,12 +17,13 @@ fn main() {
         ronda: Some(Ronda { archivos: 9_400, bytes: 102_000_000_000, bytes_base: 54_000_000_000 }),
         proxima: Some(1_000_000 + 3 * 3600 + 55 * 60),
         renovando_enlaces: false,
+        listado_previsto: None,
     };
     let estados = [
         (EstadoUi { fase: Fase::Copiando { hechas: 812, total: 9_400 }, verificadas: 18_200, total: 35_000, detalle: detalle.clone() }, Some(29_300_000.0), None, 0.3),
         (EstadoUi { fase: Fase::Inactiva, verificadas: 35_000, total: 35_000, detalle: Detalle { bytes_verificados: 210_000_000_000, actual: None, ..detalle.clone() } }, None, Some(Boton::Carpeta), 0.0),
         (EstadoUi { fase: Fase::Pausada, verificadas: 18_200, total: 35_000, detalle: Detalle { con_error: 3, actual: None, ..detalle.clone() } }, None, Some(Boton::Pausa), 0.0),
-        (EstadoUi { fase: Fase::Listando { vistos: 12_400 }, verificadas: 0, total: 0, detalle: Detalle::default() }, None, None, 0.7),
+        (EstadoUi { fase: Fase::Listando { vistos: 3_225 }, verificadas: 18_200, total: 35_000, detalle: Detalle { listado_previsto: Some(19_570), actual: None, ronda: None, ..detalle.clone() } }, None, None, 0.7),
     ];
     let (w, h) = ((panel_gdi::ANCHO as f32 * escala).round() as i32, (panel_gdi::ALTO as f32 * escala).round() as i32);
     let hueco = 24;
@@ -31,7 +32,7 @@ fn main() {
     for (fila, oscuro) in [false, true].into_iter().enumerate() {
         for (col, (e, vel, hover, pulso)) in estados.iter().enumerate() {
             let mut l = Lienzo::nuevo(w, h);
-            panel_gdi::pintar(&mut l, &vista(e, *vel, 1_000_000), oscuro, escala, *hover, *pulso);
+            panel_gdi::pintar(&mut l, &vista(e, Medidas { bytes_por_seg: *vel, elementos_por_seg: Some(1250.0 / 60.0), media_ultima_ronda: Some(24_600_000.0) }, 1_000_000), oscuro, escala, *hover, *pulso);
             let px = l.pixeles();
             let (ox, oy) = (hueco + col as i32 * (w + hueco), hueco + fila as i32 * (h + hueco));
             for y in 0..h {

@@ -356,7 +356,7 @@ pub fn pintar(l: &mut Lienzo, v: &Vista, oscuro: bool, escala: f32, hover: Optio
     texto(dc, &f_titulo, &v.titulo, p.texto, (e(P), e(50), ancho_util, e(32)), Alinear::Izq);
     texto(dc, &f_peq, &v.linea, p.texto, (e(P), e(104), ancho_util, e(18)), Alinear::Izq);
     texto(dc, &f_peq, &v.linea_total, p.secundario, (e(P), e(124), ancho_util, e(18)), Alinear::Izq);
-    let filas = [("Ahora", &v.ahora), ("Velocidad", &v.velocidad), ("Último listado de iCloud", &v.listado), ("Errores", &v.errores)];
+    let filas = [("Ahora", &v.ahora), (v.etiqueta_velocidad, &v.velocidad), ("Último listado de iCloud", &v.listado), ("Errores", &v.errores)];
     for (i, (nombre, valor)) in filas.iter().enumerate() {
         let y = tarjeta_y + e(2) + fila * i as f32;
         let x = e(P + 12);

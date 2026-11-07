@@ -443,6 +443,14 @@ impl Registro {
         })
     }
 
+    /// Cuántos elementos tenía el último listado completo de iCloud (None si nunca se listó).
+    /// Sirve de total previsto mientras se lista de nuevo.
+    pub fn assets_ultimo_listado(&self) -> Result<Option<u64>> {
+        let Some(marca) = self.marca_lista()? else { return Ok(None) };
+        let n: i64 = self.con.query_row("SELECT COUNT(*) FROM assets WHERE visto_en_lista = ?1", params![marca], |r| r.get(0))?;
+        Ok(Some(n as u64))
+    }
+
     pub fn progreso(&self) -> Result<Progreso> {
         let (partes, verificadas, con_error, bytes_total, bytes_verificados): (i64, i64, i64, i64, i64) = self.con.query_row(
             "SELECT COUNT(*),
@@ -741,6 +749,8 @@ mod tests {
         let p = r.progreso().unwrap();
         assert_eq!((p.partes, p.verificadas, p.con_error, p.bytes_total, p.bytes_verificados), (2, 1, 0, 15, 10));
         assert_eq!(p.ultimo_listado, r.marca_lista().unwrap());
+        assert_eq!(Registro::en_memoria().unwrap().assets_ultimo_listado().unwrap(), None);
+        assert_eq!(r.assets_ultimo_listado().unwrap(), Some(1));
         assert_eq!(r.errores(10).unwrap(), vec!["IMG_A1 (live): HTTP 503".to_string()]);
     }
 }

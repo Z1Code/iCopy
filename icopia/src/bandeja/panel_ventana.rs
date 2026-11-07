@@ -2,7 +2,7 @@
 //! junto al reloj (como los paneles de Wi-Fi o volumen de Windows 11).
 use crate::bandeja::estado::EstadoUi;
 use crate::bandeja::hover::{self, Hover, Rect, VigiaClics};
-use crate::bandeja::panel::{es_nueva_ronda, principal, vista, Principal, Velocimetro};
+use crate::bandeja::panel::{es_nueva_ronda, principal, vista, Medidas, MediaRonda, Principal, Velocimetro};
 use crate::bandeja::panel_gdi::{self, Boton, Lienzo};
 use crate::descarga::BYTES_RECIBIDOS;
 use std::sync::atomic::Ordering;
@@ -25,6 +25,24 @@ extern "system" {
 pub fn boton_raton_pulsado() -> bool {
     // VK_LBUTTON, VK_RBUTTON, VK_MBUTTON
     [0x01, 0x02, 0x04].into_iter().any(|vk| unsafe { GetAsyncKeyState(vk) } < 0)
+}
+
+/// Último clic (botón abajo) visto por el gancho de ratón mientras el panel está abierto.
+/// Mirar el estado de los botones cada 50 ms no basta: un toque corto (p. ej. en un panel
+/// táctil) puede caer entre dos lecturas.
+static CLIC_GANCHO: std::sync::Mutex<Option<(i32, i32)>> = std::sync::Mutex::new(None);
+
+unsafe extern "system" fn gancho_raton(codigo: i32, w: usize, l: isize) -> isize {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CallNextHookEx, MSLLHOOKSTRUCT, WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_RBUTTONDOWN, WM_XBUTTONDOWN,
+    };
+    if codigo >= 0 && matches!(w as u32, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN) {
+        let m = &*(l as *const MSLLHOOKSTRUCT);
+        if let Ok(mut c) = CLIC_GANCHO.lock() {
+            *c = Some((m.pt.x, m.pt.y));
+        }
+    }
+    CallNextHookEx(std::ptr::null_mut(), codigo, w, l)
 }
 
 /// Pone hwnd en primer plano aunque Windows lo restrinja a otro proceso: se engancha un
@@ -70,8 +88,13 @@ pub struct Panel {
     /// Punto del icono de la bandeja (para colocar el panel).
     ancla: (i32, i32),
     velocimetro: Velocimetro,
+    /// Ritmo del listado (elementos vistos por segundo).
+    ritmo_listado: Velocimetro,
+    media_ronda: MediaRonda,
     ultima_muestra: Option<Instant>,
     t0: Instant,
+    /// Gancho de ratón de bajo nivel (solo mientras el panel está abierto).
+    gancho: Option<isize>,
 }
 
 impl Panel {
@@ -105,8 +128,11 @@ impl Panel {
             vigia: VigiaClics::default(),
             ancla: (0, 0),
             velocimetro: Velocimetro::default(),
+            ritmo_listado: Velocimetro::default(),
+            media_ronda: MediaRonda::default(),
             ultima_muestra: None,
             t0: Instant::now(),
+            gancho: None,
         }
     }
 
@@ -122,51 +148,93 @@ impl Panel {
         self.t0.elapsed().as_secs_f64()
     }
 
-    /// El ratón entra en el icono de la bandeja (o se mueve por él) o sale de él.
-    pub fn raton_en_icono(&mut self, encima: bool, ancla: Option<(i32, i32)>) {
-        if let Some(a) = ancla {
-            self.ancla = a;
-        }
+    /// El icono de la bandeja avisa de que el ratón entró o se movió sobre él.
+    pub fn aviso_icono(&mut self, ancla: (i32, i32)) {
+        self.ancla = ancla;
         let t = self.segundos();
-        self.raton.icono(encima, t);
+        self.raton.aviso_icono(t);
     }
 
-    /// Avanza los temporizadores del paso del ratón; abre o cierra el panel si toca.
-    pub fn tick_raton(&mut self, estado: &EstadoUi) {
-        match self.raton.tick(self.segundos()) {
+    /// El icono avisa de que el ratón salió (no siempre llega).
+    pub fn salio_icono(&mut self) {
+        self.raton.salio_icono();
+    }
+
+    /// Vigila el ratón (cada ~50 ms): abre o cierra el panel por el paso del ratón y lo cierra
+    /// con un clic fuera. `icono` es el rectángulo que Windows da para el icono de la bandeja.
+    pub fn vigilar_raton(&mut self, estado: &EstadoUi, icono: Option<Rect>) {
+        let mut p = POINT { x: 0, y: 0 };
+        unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut p) };
+        let cursor = (p.x, p.y);
+        // Un rectángulo vacío, enorme o fuera de la pantalla (icono en el desplegable de iconos
+        // ocultos, ya cerrado) no vale: ante la duda se trata como si el ratón no estuviera ahí.
+        let icono = icono.filter(|r| {
+            let (w, h) = (r.x1 - r.x0, r.y1 - r.y0);
+            let pantalla = unsafe {
+                use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN};
+                let (x, y) = (GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN));
+                Rect { x0: x, y0: y, x1: x + GetSystemMetrics(SM_CXVIRTUALSCREEN), y1: y + GetSystemMetrics(SM_CYVIRTUALSCREEN) }
+            };
+            w > 0 && h > 0 && w <= 200 && h <= 200 && pantalla.contiene((r.x0, r.y0)) && pantalla.contiene((r.x1 - 1, r.y1 - 1))
+        });
+        let visible = self.visible();
+        let panel = visible.then(|| {
+            let mut r = unsafe { std::mem::zeroed() };
+            unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect(self.ventana.hwnd() as HWND, &mut r) };
+            Rect { x0: r.left, y0: r.top, x1: r.right, y1: r.bottom }
+        });
+        let estado_cursor = hover::Cursor {
+            en_panel: panel.is_some_and(|r| r.contiene(cursor)),
+            en_icono: icono.is_some_and(|r| r.contiene(cursor)),
+        };
+        let pulsado = boton_raton_pulsado();
+        let clic = CLIC_GANCHO.lock().ok().and_then(|mut c| c.take());
+        let fuera = panel.is_some_and(|r| {
+            let por_gancho = clic.is_some_and(|p| hover::clic_fuera(p, r, icono));
+            let por_estado = self.vigia.actualizar(pulsado, cursor, r, icono);
+            por_gancho || por_estado
+        });
+        let orden = self.raton.tick(self.segundos(), estado_cursor);
+        if fuera {
+            self.ocultar();
+            return;
+        }
+        match orden {
             Some(hover::Orden::Abrir) => self.mostrar(self.ancla, estado, false),
             Some(hover::Orden::Cerrar) => self.ocultar(),
             None => {}
         }
     }
 
-    /// ¿Cree que el ratón está sobre el icono? (la bandeja comprueba cuándo sale)
-    pub fn raton_sobre_icono(&self) -> bool {
-        self.raton.sobre_icono()
-    }
-
-    /// Mientras está abierto: un clic fuera del panel (y fuera del icono) lo cierra.
-    pub fn vigilar_clics(&mut self, icono: Option<Rect>) {
-        if !self.visible() {
-            return;
-        }
-        let mut r = unsafe { std::mem::zeroed() };
-        let mut p = POINT { x: 0, y: 0 };
+    /// Con el panel abierto: gancho de ratón (clics fuera) y un temporizador propio de 50 ms en
+    /// su ventana, que despierta el bucle pase lo que pase para vigilar el ratón.
+    fn vigilancia(&mut self, activa: bool) {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{KillTimer, SetTimer, SetWindowsHookExW, UnhookWindowsHookEx, WH_MOUSE_LL};
+        const TEMPORIZADOR: usize = 0x1C0;
+        let hwnd = self.ventana.hwnd() as HWND;
         unsafe {
-            windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect(self.ventana.hwnd() as HWND, &mut r);
-            windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut p);
-        }
-        let panel = Rect { x0: r.left, y0: r.top, x1: r.right, y1: r.bottom };
-        if self.vigia.actualizar(boton_raton_pulsado(), (p.x, p.y), panel, icono) {
-            self.ocultar();
+            if activa {
+                if let Ok(mut c) = CLIC_GANCHO.lock() {
+                    *c = None;
+                }
+                if self.gancho.is_none() {
+                    let h = SetWindowsHookExW(WH_MOUSE_LL, Some(gancho_raton), windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(std::ptr::null()), 0);
+                    self.gancho = (!h.is_null()).then_some(h as isize);
+                }
+                SetTimer(hwnd, TEMPORIZADOR, 50, None);
+            } else {
+                if let Some(h) = self.gancho.take() {
+                    UnhookWindowsHookEx(h as _);
+                }
+                KillTimer(hwnd, TEMPORIZADOR);
+            }
         }
     }
 
-    /// ¿Hay que despertar pronto el bucle por el paso del ratón?
+    /// ¿Hay que vigilar el ratón a menudo?
     pub fn raton_pendiente(&self) -> bool {
-        self.raton.pendiente()
+        self.raton.pendiente() || self.visible()
     }
-
     /// Muestrea el contador de bytes descargados (para la velocidad), como mucho dos veces por segundo.
     pub fn muestrear(&mut self) {
         let ahora = Instant::now();
@@ -179,10 +247,19 @@ impl Panel {
 
     /// Llega un estado nuevo del motor: al empezar una ronda, la velocidad se mide de cero.
     pub fn cambio_de_estado(&mut self, antes: &EstadoUi, despues: &EstadoUi) {
+        let t = self.segundos();
+        let bytes = BYTES_RECIBIDOS.load(Ordering::Relaxed);
         if es_nueva_ronda(antes, despues) {
             self.velocimetro.reiniciar();
+            self.ritmo_listado.reiniciar();
+            self.media_ronda.empezar(t, bytes);
             self.ultima_muestra = None;
             self.muestrear();
+        } else if antes.trabajando() && !despues.trabajando() {
+            self.media_ronda.terminar(t, bytes);
+        }
+        if let crate::bandeja::estado::Fase::Listando { vistos } = despues.fase {
+            self.ritmo_listado.registrar(t, vistos as u64);
         }
     }
 
@@ -230,21 +307,28 @@ impl Panel {
         self.hover = None;
         self.pintar(estado);
         self.vigia.reiniciar(boton_raton_pulsado());
+        self.vigilancia(true);
+        // Mostrar y ocultar siempre con Win32 directamente (nunca con tao): tao lleva su propia
+        // cuenta de si la ventana es visible y, si se mezclan, `set_visible(false)` no hace nada
+        // y el panel se queda abierto.
+        use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_SHOW, SW_SHOWNOACTIVATE};
+        let hwnd = self.ventana.hwnd() as HWND;
         if activar {
-            self.ventana.set_visible(true);
-            traer_al_frente(self.ventana.hwnd() as HWND);
+            unsafe { ShowWindow(hwnd, SW_SHOW) };
+            traer_al_frente(hwnd);
         } else {
             // Al pasar el ratón no se roba el foco a lo que el usuario esté haciendo.
-            use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_SHOWNOACTIVATE};
-            unsafe { ShowWindow(self.ventana.hwnd() as HWND, SW_SHOWNOACTIVATE) };
+            unsafe { ShowWindow(hwnd, SW_SHOWNOACTIVATE) };
         }
         self.volcar();
     }
 
     pub fn ocultar(&mut self) {
         if self.visible() {
-            self.ventana.set_visible(false);
+            use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+            unsafe { ShowWindow(self.ventana.hwnd() as HWND, SW_HIDE) };
         }
+        self.vigilancia(false);
         self.raton.cerrado();
         self.oculto_en = Some(Instant::now());
     }
@@ -277,7 +361,12 @@ impl Panel {
             self.lienzo = Some(Lienzo::nuevo(w, h));
         }
         let pulso = (self.t0.elapsed().as_secs_f32() / 1.6).fract();
-        let v = vista(estado, self.velocimetro.bytes_por_seg(), chrono::Utc::now().timestamp());
+        let medidas = Medidas {
+            bytes_por_seg: self.velocimetro.bytes_por_seg(),
+            elementos_por_seg: self.ritmo_listado.bytes_por_seg(),
+            media_ultima_ronda: self.media_ronda.media(),
+        };
+        let v = vista(estado, medidas, chrono::Utc::now().timestamp());
         let l = self.lienzo.as_mut().expect("lienzo");
         panel_gdi::pintar(l, &v, self.oscuro, self.escala, self.hover, pulso);
     }
@@ -298,10 +387,7 @@ impl Panel {
             WindowEvent::Focused(false) => self.ocultar(),
             // Un clic dentro de un panel abierto al pasar el ratón le da el foco: queda fijo.
             WindowEvent::Focused(true) => self.raton.fijar(),
-            WindowEvent::CursorEntered { .. } => {
-                let t = self.segundos();
-                self.raton.panel(true, t);
-            }
+
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed && event.logical_key == Key::Escape => self.ocultar(),
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x / self.escala as f64, position.y / self.escala as f64);
@@ -312,8 +398,6 @@ impl Panel {
                 }
             }
             WindowEvent::CursorLeft { .. } => {
-                let t = self.segundos();
-                self.raton.panel(false, t);
                 if self.hover.take().is_some() {
                     self.refrescar(estado);
                 }

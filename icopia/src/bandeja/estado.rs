@@ -39,6 +39,8 @@ pub struct Detalle {
     pub proxima: Option<i64>,
     /// El listado en curso es para pedir enlaces nuevos (los anteriores caducaron).
     pub renovando_enlaces: bool,
+    /// Mientras se lista: cuántos elementos trajo el listado completo anterior.
+    pub listado_previsto: Option<u64>,
 }
 
 /// Lo que tiene que copiar la ronda actual, para medir su avance aparte del total.
@@ -96,6 +98,7 @@ impl EstadoUi {
                 ronda: None,
                 proxima: None,
                 renovando_enlaces: false,
+                listado_previsto: None,
             },
         }
     }
