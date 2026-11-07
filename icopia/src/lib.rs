@@ -6,3 +6,4 @@ pub mod puente;
 pub mod layout;
 pub mod verificar;
 pub mod registro;
+pub mod descarga;
