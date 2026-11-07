@@ -3,3 +3,4 @@ pub mod config;
 pub mod fuente;
 pub mod modelo;
 pub mod puente;
+pub mod layout;
