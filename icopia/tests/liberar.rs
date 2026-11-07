@@ -89,3 +89,20 @@ fn sin_listado_no_se_puede_liberar() {
     let reg = Mutex::new(Registro::en_memoria().unwrap());
     assert!(liberar::preparar(d.path(), &reg, 30, motor::ahora(), &|_, _| {}).is_err());
 }
+
+#[test]
+fn assets_con_datos_no_copiables_no_se_proponen() {
+    let v1 = jpeg(100);
+    let s = servidor(vec![("/v1", Comportamiento::Servir(v1.clone()))]);
+    let mut a = asset("V1", "IMG_V1", "2025-01-10T10:00:00-05:00", "PrimarySync", vec![parte(TipoParte::Original, &v1, s.url("/v1"), "JPG")]);
+    a.liberable = false;
+    let mut fuente = FuenteFalsa { assets: vec![a], ..Default::default() };
+    let d = tempfile::tempdir().unwrap();
+    let reg = Mutex::new(Registro::en_memoria().unwrap());
+    let op = OpcionesRonda { concurrencia: 1, mes: None };
+    let r = motor::ejecutar_ronda(d.path(), &reg, &mut fuente, &descarga::cliente(), &op, &AtomicBool::new(false), &|_: Avance| {}).unwrap();
+    assert_eq!(r.verificadas, 1, "se copia igualmente");
+    let plan = liberar::preparar(d.path(), &reg, 30, motor::ahora(), &|_, _| {}).unwrap();
+    assert!(plan.listos.is_empty());
+    assert_eq!((plan.no_verificados, plan.no_liberables), (0, 1));
+}

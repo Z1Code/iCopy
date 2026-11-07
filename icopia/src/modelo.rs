@@ -8,6 +8,8 @@ pub const BIBLIOTECA_PERSONAL: &str = "PrimarySync";
 pub enum TipoParte {
     Original,
     Live,
+    /// La otra mitad de un par RAW+JPEG (resOriginalAlt).
+    Alternativa,
     Editada,
 }
 
@@ -16,6 +18,7 @@ impl TipoParte {
         match self {
             TipoParte::Original => "original",
             TipoParte::Live => "live",
+            TipoParte::Alternativa => "alternativa",
             TipoParte::Editada => "editada",
         }
     }
@@ -24,6 +27,7 @@ impl TipoParte {
         match s {
             "original" => Some(TipoParte::Original),
             "live" => Some(TipoParte::Live),
+            "alternativa" => Some(TipoParte::Alternativa),
             "editada" => Some(TipoParte::Editada),
             _ => None,
         }
@@ -46,7 +50,15 @@ pub struct AssetIcloud {
     pub nombre_base: String,
     /// RFC 3339 en hora local con desfase, p. ej. "2026-08-10T19:37:18-04:00".
     pub fecha: String,
+    /// false si iCloud guarda datos de este asset que icopia no copia: nunca se borra de iCloud.
+    /// El puente real siempre lo envía; el valor por omisión es solo por compatibilidad.
+    #[serde(default = "verdadero")]
+    pub liberable: bool,
     pub partes: Vec<ParteIcloud>,
+}
+
+fn verdadero() -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -62,11 +74,22 @@ mod tests {
         let a: AssetIcloud = serde_json::from_str(j).unwrap();
         assert_eq!(a.partes[0].tamano, 10);
         assert_eq!(a.partes[1].tipo, TipoParte::Live);
+        assert!(a.liberable, "sin el campo se asume liberable (compatibilidad)");
+    }
+
+    #[test]
+    fn deserializa_alternativa_y_no_liberable() {
+        let j = r#"{"id":"A1","biblioteca":"PrimarySync","nombre_base":"IMG_0001","liberable":false,
+            "fecha":"2026-08-10T19:37:18-04:00","partes":[
+            {"tipo":"alternativa","tamano":10,"url":"http://x/1","extension":"DNG","checksum":"c"}]}"#;
+        let a: AssetIcloud = serde_json::from_str(j).unwrap();
+        assert_eq!(a.partes[0].tipo, TipoParte::Alternativa);
+        assert!(!a.liberable);
     }
 
     #[test]
     fn tipo_parte_ida_y_vuelta() {
-        for t in [TipoParte::Original, TipoParte::Live, TipoParte::Editada] {
+        for t in [TipoParte::Original, TipoParte::Live, TipoParte::Alternativa, TipoParte::Editada] {
             assert_eq!(TipoParte::desde_str(t.como_str()), Some(t));
         }
         assert_eq!(TipoParte::desde_str("x"), None);

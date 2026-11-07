@@ -14,6 +14,8 @@ pub struct PlanLiberar {
     pub listos: Vec<Candidato>,
     pub excluidos: Vec<(Candidato, String)>,
     pub no_verificados: u64,
+    /// Con datos en iCloud que icopia aún no sabe copiar.
+    pub no_liberables: u64,
     pub bytes: u64,
 }
 
@@ -25,13 +27,14 @@ pub struct ResumenBorrado {
 
 /// Requiere un listado completo reciente (`marca_lista`): solo propone lo que sigue en iCloud.
 pub fn preparar(destino: &Path, registro: &Mutex<Registro>, mantener_dias: u32, ahora: i64, avance: &dyn Fn(usize, usize)) -> Result<PlanLiberar> {
-    let (candidatos, no_verificados) = {
+    let c = {
         let reg = registro.lock().unwrap();
         let marca = reg.marca_lista()?.ok_or_else(|| anyhow!("No hay un listado completo de iCloud; no se puede liberar"))?;
         reg.candidatos_liberar(marca, ahora - i64::from(mantener_dias) * 86_400)?
     };
+    let candidatos = c.candidatos;
     let total = candidatos.len();
-    let mut plan = PlanLiberar { listos: vec![], excluidos: vec![], no_verificados, bytes: 0 };
+    let mut plan = PlanLiberar { listos: vec![], excluidos: vec![], no_verificados: c.no_verificados, no_liberables: c.no_liberables, bytes: 0 };
     for (i, c) in candidatos.into_iter().enumerate() {
         match motivo_exclusion(destino, &c) {
             None => {

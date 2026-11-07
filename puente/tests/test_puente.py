@@ -24,7 +24,7 @@ class V:
 
 class AssetFalso:
     def __init__(self, id="AbC-123+xyz", nombre="IMG_0001.HEIC", versiones=None,
-                 item_type=AssetItemType.IMAGE, campos=None,
+                 item_type=AssetItemType.IMAGE, campos=None, campos_master=None,
                  fecha=datetime(2026, 8, 10, 23, 37, 18, tzinfo=timezone.utc)):
         self.id = id
         self._nombre = nombre
@@ -32,6 +32,7 @@ class AssetFalso:
         self.item_type = item_type
         self.item_type_extension = "HEIC"
         self._asset_record = {"fields": campos or {}, "recordChangeTag": "tag1", "recordName": id}
+        self._master_record = {"fields": campos_master or {}, "recordName": id}
         self.asset_date = fecha
         self.has_asset_date = True
         self.added_date = fecha
@@ -189,3 +190,47 @@ def test_listar_emite_assets_avisos_y_total(salida):
     assert "aviso" in ls[1]
     assert ls[-1] == {"ok": True, "total": 1, "omitidos": 2}
     assert set(p.cache) == {"A1"}
+
+
+def _res(size, url, ck="k"):
+    return {"value": {"size": size, "downloadURL": url, "fileChecksum": ck}}
+
+
+def test_raw_jpeg_copia_la_alternativa():
+    a = AssetFalso(versiones={
+        AssetVersionSize.ORIGINAL: V(100, "u1", "public.jpeg"),
+        AssetVersionSize.ALTERNATIVE: V(300, "u2", "com.adobe.raw-image"),
+    }, campos_master={"resOriginalRes": {}, "resOriginalAltRes": {}})
+    j = pi.asset_a_json(a, "PrimarySync")
+    assert [(p["tipo"], p["extension"], p["tamano"], p["url"]) for p in j["partes"]] == [
+        ("original", "JPG", 100, "u1"), ("alternativa", "DNG", 300, "u2")]
+    assert j["liberable"] is True
+
+
+def test_video_editado_copia_el_render():
+    a = AssetFalso(nombre="IMG_0002.MOV", item_type=AssetItemType.MOVIE, versiones={
+        AssetVersionSize.ORIGINAL: V(900, "u", "com.apple.quicktime-movie"),
+    }, campos={"resVidFullRes": _res(700, "uv", "ckv"),
+               "resVidFullFileType": {"value": "com.apple.quicktime-movie"},
+               "resVidMedRes": {}, "resVidSmallRes": {}, "resJPEGThumbRes": {}},
+       campos_master={"resOriginalRes": {}})
+    j = pi.asset_a_json(a, "PrimarySync")
+    assert [(p["tipo"], p["extension"], p["tamano"], p["url"], p["checksum"]) for p in j["partes"]] == [
+        ("original", "MOV", 900, "u", "ck"), ("editada", "MOV", 700, "uv", "ckv")]
+    assert j["liberable"] is True
+
+
+def test_derivados_no_impiden_liberar():
+    a = AssetFalso(versiones={AssetVersionSize.ORIGINAL: V(100, "u1", "public.heic")},
+                   campos={"resJPEGMedRes": {}, "resJPEGThumbRes": {}, "resJPEGLargeRes": {}},
+                   campos_master={"resOriginalRes": {}, "resJPEGThumbRes": {}})
+    assert pi.asset_a_json(a, "PrimarySync")["liberable"] is True
+
+
+def test_datos_desconocidos_no_son_liberables():
+    for campos, master in [({"resSidecarRes": {}}, {}),
+                           ({}, {"resAlgoNuevoRes": {}}),
+                           ({"resVidFullRes": {}}, {})]:  # vídeo editado de una Live Photo: no se copia
+        a = AssetFalso(versiones={AssetVersionSize.ORIGINAL: V(100, "u1", "public.heic")},
+                       campos=campos, campos_master=master)
+        assert pi.asset_a_json(a, "PrimarySync")["liberable"] is False, (campos, master)

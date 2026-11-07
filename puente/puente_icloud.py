@@ -23,7 +23,7 @@ import traceback
 import urllib.parse
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from pyicloud_ipd.asset_version import ITEM_TYPE_EXTENSIONS
+from pyicloud_ipd.asset_version import ITEM_TYPE_EXTENSIONS, AssetVersion
 from pyicloud_ipd.base import PyiCloudService
 from pyicloud_ipd.exceptions import PyiCloudAPIResponseException, PyiCloudFailedLoginException
 from pyicloud_ipd.item_type import AssetItemType
@@ -72,6 +72,34 @@ def _parte(tipo: str, version: Any, extension: str) -> Dict[str, Any]:
             "extension": extension, "checksum": version.checksum or ""}
 
 
+# Campos res*Res que son solo copias reducidas (miniaturas, vistas previas) y se regeneran.
+DERIVADOS = {"resJPEGLarge", "resJPEGMed", "resJPEGThumb", "resVidMed", "resVidSmall"}
+
+
+def _campos(registro: Any) -> Dict[str, Any]:
+    if not isinstance(registro, dict):
+        return {}
+    return registro.get("fields") or {}
+
+
+def _prefijos_res(asset: Any) -> set:
+    """Prefijos de todos los recursos (campos 'res...Res') del asset y su master."""
+    prefijos = set()
+    for registro in (getattr(asset, "_asset_record", None), getattr(asset, "_master_record", None)):
+        for clave in _campos(registro):
+            if clave.startswith("res") and clave.endswith("Res") and len(clave) > 6:
+                prefijos.add(clave[:-3])
+    return prefijos
+
+
+def _version_de_campos(campos: Dict[str, Any], prefijo: str) -> Optional[AssetVersion]:
+    res = (campos.get(f"{prefijo}Res") or {}).get("value")
+    tipo = (campos.get(f"{prefijo}FileType") or {}).get("value")
+    if not res or not tipo:
+        return None
+    return AssetVersion(res["size"], res["downloadURL"], tipo, res.get("fileChecksum"))
+
+
 def asset_a_json(asset: Any, biblioteca: str) -> Optional[Dict[str, Any]]:
     versiones = asset.versions
     original = versiones.get(AssetVersionSize.ORIGINAL)
@@ -79,17 +107,33 @@ def asset_a_json(asset: Any, biblioteca: str) -> Optional[Dict[str, Any]]:
         return None
     nombre = filename_with_fallback(asset.id, asset.item_type_extension)(asset.calculate_filename())
     partes = [_parte("original", original, extension_de(original.type, nombre))]
-    if asset.item_type == AssetItemType.IMAGE:
+    copiados = {"resOriginal"}
+    campos_asset = _campos(asset._asset_record)
+    if asset.item_type == AssetItemType.MOVIE:
+        if "resVidFullRes" in campos_asset:
+            editada = _version_de_campos(campos_asset, "resVidFull")
+            if editada is not None:
+                partes.append(_parte("editada", editada, extension_de(editada.type, nombre)))
+                copiados.add("resVidFull")
+    else:
         live = versiones.get(LivePhotoVersionSize.ORIGINAL)
         if live is not None:
             partes.append(_parte("live", live, "MOV"))
-        if "resJPEGFullRes" in asset._asset_record.get("fields", {}):
+            copiados.add("resOriginalVidCompl")
+        alternativa = versiones.get(AssetVersionSize.ALTERNATIVE)
+        if alternativa is not None:
+            partes.append(_parte("alternativa", alternativa, extension_de(alternativa.type, nombre)))
+            copiados.add("resOriginalAlt")
+        if "resJPEGFullRes" in campos_asset:
             editada = versiones.get(AssetVersionSize.ADJUSTED)
             if editada is not None:
                 partes.append(_parte("editada", editada, extension_de(editada.type, nombre)))
+                copiados.add("resJPEGFull")
+    # Si iCloud guarda algo que no copiamos (y no es una miniatura), borrar el asset lo perdería.
+    liberable = not (_prefijos_res(asset) - copiados - DERIVADOS)
     return {"id": asset.id, "biblioteca": biblioteca,
             "nombre_base": os.path.splitext(nombre)[0], "fecha": fecha_de(asset),
-            "partes": partes}
+            "liberable": liberable, "partes": partes}
 
 
 def borrar_en_icloud(lib: Any, asset: Any) -> Optional[str]:

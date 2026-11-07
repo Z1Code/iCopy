@@ -36,6 +36,7 @@ pub fn nombre_parte(nombre_base: &str, tipo: TipoParte, extension: &str, sufijo:
     let ext = sanear(extension).to_uppercase();
     match tipo {
         TipoParte::Editada => format!("{base} (editada).{ext}"),
+        TipoParte::Alternativa => format!("{base} (alternativa).{ext}"),
         _ => format!("{base}.{ext}"),
     }
 }
@@ -93,6 +94,7 @@ mod tests {
         assert_eq!(nombre_parte("IMG_1", TipoParte::Original, "heic", None), "IMG_1.HEIC");
         assert_eq!(nombre_parte("IMG_1", TipoParte::Live, "MOV", None), "IMG_1.MOV");
         assert_eq!(nombre_parte("IMG_1", TipoParte::Editada, "JPG", None), "IMG_1 (editada).JPG");
+        assert_eq!(nombre_parte("IMG_1", TipoParte::Alternativa, "DNG", None), "IMG_1 (alternativa).DNG");
         assert_eq!(nombre_parte("IMG_1", TipoParte::Original, "JPG", Some("ab12cd")), "IMG_1 (ab12cd).JPG");
     }
 

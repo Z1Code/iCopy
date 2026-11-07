@@ -318,6 +318,9 @@ fn cmd_liberar(args: &[String]) -> Result<()> {
     if plan.no_verificados > 0 {
         println!("No incluidos por no estar copiados y verificados del todo: {}", plan.no_verificados);
     }
+    if plan.no_liberables > 0 {
+        println!("No incluidos: contienen datos que icopia aún no sabe copiar: {}", plan.no_liberables);
+    }
     if !plan.excluidos.is_empty() {
         println!("EXCLUIDOS por fallar la re-verificación: {}", plan.excluidos.len());
         for (c, m) in plan.excluidos.iter().take(10) {

@@ -87,6 +87,7 @@ mod tests {
             biblioteca: "PrimarySync".into(),
             nombre_base: id.into(),
             fecha: "2026-08-10T19:37:18-04:00".into(),
+            liberable: true,
             partes: vec![],
         }
     }

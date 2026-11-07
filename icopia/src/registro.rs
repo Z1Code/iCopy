@@ -43,6 +43,15 @@ pub struct Candidato {
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
+pub struct CandidatosLiberar {
+    pub candidatos: Vec<Candidato>,
+    /// Liberables que aún no están copiados y verificados del todo.
+    pub no_verificados: u64,
+    /// Tienen datos en iCloud que icopia no sabe copiar: nunca se proponen.
+    pub no_liberables: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Resumen {
     pub assets: u64,
     pub assets_completos: u64,
@@ -65,7 +74,8 @@ CREATE TABLE IF NOT EXISTS assets(
   fecha_unix INTEGER NOT NULL,
   mes TEXT NOT NULL,
   visto_en_lista INTEGER NOT NULL,
-  borrado_icloud TEXT
+  borrado_icloud TEXT,
+  liberable INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS partes(
   asset_id TEXT NOT NULL REFERENCES assets(id),
@@ -151,6 +161,7 @@ impl Registro {
     fn con_esquema(con: Connection) -> Result<Registro> {
         con.execute_batch(ESQUEMA)?;
         asegurar_columna(&con, "partes", "sha_pendiente", "TEXT")?;
+        asegurar_columna(&con, "assets", "liberable", "INTEGER NOT NULL DEFAULT 1")?;
         Ok(Registro { con })
     }
 
@@ -158,11 +169,12 @@ impl Registro {
         let f = layout::fecha(&a.fecha).with_context(|| format!("fecha inválida en {}", a.id))?;
         let tx = self.con.transaction()?;
         tx.execute(
-            "INSERT INTO assets(id, biblioteca, nombre_base, fecha, fecha_unix, mes, visto_en_lista) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO assets(id, biblioteca, nombre_base, fecha, fecha_unix, mes, visto_en_lista, liberable)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(id) DO UPDATE SET biblioteca = excluded.biblioteca, nombre_base = excluded.nombre_base,
                fecha = excluded.fecha, fecha_unix = excluded.fecha_unix, mes = excluded.mes,
-               visto_en_lista = excluded.visto_en_lista, borrado_icloud = NULL",
-            params![a.id, a.biblioteca, a.nombre_base, a.fecha, f.timestamp(), layout::mes_clave(&f), marca],
+               visto_en_lista = excluded.visto_en_lista, borrado_icloud = NULL, liberable = excluded.liberable",
+            params![a.id, a.biblioteca, a.nombre_base, a.fecha, f.timestamp(), layout::mes_clave(&f), marca, a.liberable],
         )?;
         for p in &a.partes {
             tx.execute(UPSERT_PARTE, params![a.id, p.tipo.como_str(), p.extension, p.tamano as i64, p.checksum, p.url])?;
@@ -194,7 +206,7 @@ impl Registro {
              FROM partes p JOIN assets a ON a.id = p.asset_id
              WHERE p.estado <> 'verificado' AND p.proximo_intento <= ?1 AND a.borrado_icloud IS NULL
                AND {EN_ULTIMA_LISTA} AND (?2 IS NULL OR a.mes = ?2)
-             ORDER BY a.fecha_unix, p.asset_id, CASE p.tipo WHEN 'original' THEN 0 WHEN 'live' THEN 1 ELSE 2 END"
+             ORDER BY a.fecha_unix, p.asset_id, CASE p.tipo WHEN 'original' THEN 0 WHEN 'live' THEN 1 WHEN 'alternativa' THEN 2 ELSE 3 END"
         );
         let mut st = self.con.prepare(&sql)?;
         let filas = st.query_map(params![ahora, mes], |r| {
@@ -306,11 +318,13 @@ impl Registro {
     }
 
     /// Assets personales, del listado `marca`, anteriores a `limite_unix`, con todas sus partes verificadas.
-    /// Devuelve también cuántos cumplirían salvo por no estar verificados del todo.
-    pub fn candidatos_liberar(&self, marca: i64, limite_unix: i64) -> Result<(Vec<Candidato>, u64)> {
+    /// Solo los marcados como liberables. Cuenta aparte los que no están verificados del todo
+    /// y los que tienen datos que icopia no copia.
+    pub fn candidatos_liberar(&self, marca: i64, limite_unix: i64) -> Result<CandidatosLiberar> {
         let mut st = self.con.prepare(
             "SELECT a.id, a.nombre_base, a.fecha FROM assets a
              WHERE a.biblioteca = ?3 AND a.borrado_icloud IS NULL AND a.visto_en_lista = ?1 AND a.fecha_unix < ?2
+               AND a.liberable = 1
                AND EXISTS(SELECT 1 FROM partes p WHERE p.asset_id = a.id)
                AND NOT EXISTS(SELECT 1 FROM partes p WHERE p.asset_id = a.id
                               AND (p.estado <> 'verificado' OR p.sha256 IS NULL OR p.ruta IS NULL))
@@ -341,12 +355,20 @@ impl Registro {
         let no_listos: i64 = self.con.query_row(
             "SELECT COUNT(*) FROM assets a
              WHERE a.biblioteca = ?3 AND a.borrado_icloud IS NULL AND a.visto_en_lista = ?1 AND a.fecha_unix < ?2
+               AND a.liberable = 1
                AND (NOT EXISTS(SELECT 1 FROM partes p WHERE p.asset_id = a.id)
                     OR EXISTS(SELECT 1 FROM partes p WHERE p.asset_id = a.id AND p.estado <> 'verificado'))",
             params![marca, limite_unix, BIBLIOTECA_PERSONAL],
             |r| r.get(0),
         )?;
-        Ok((candidatos, no_listos as u64))
+        let no_liberables: i64 = self.con.query_row(
+            "SELECT COUNT(*) FROM assets a
+             WHERE a.biblioteca = ?3 AND a.borrado_icloud IS NULL AND a.visto_en_lista = ?1 AND a.fecha_unix < ?2
+               AND a.liberable = 0",
+            params![marca, limite_unix, BIBLIOTECA_PERSONAL],
+            |r| r.get(0),
+        )?;
+        Ok(CandidatosLiberar { candidatos, no_verificados: no_listos as u64, no_liberables: no_liberables as u64 })
     }
 
     pub fn marcar_borrado(&mut self, asset_id: &str, cuando: &str) -> Result<()> {
@@ -416,6 +438,7 @@ mod tests {
             biblioteca: bib.into(),
             nombre_base: format!("IMG_{id}"),
             fecha: fecha.into(),
+            liberable: true,
             partes: partes
                 .iter()
                 .map(|(t, n)| ParteIcloud { tipo: *t, tamano: *n, url: format!("http://x/{id}/{}", t.como_str()), extension: "HEIC".into(), checksum: "c".into() })
@@ -530,22 +553,52 @@ mod tests {
             dar_por_copiado(&mut r, id, t);
         }
         let limite = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z").unwrap().timestamp();
-        let (cands, no_listos) = r.candidatos_liberar(200, limite).unwrap();
-        assert_eq!(cands.iter().map(|c| c.asset_id.as_str()).collect::<Vec<_>>(), vec!["A1"]);
-        assert_eq!(cands[0].partes.len(), 2);
-        assert_eq!(no_listos, 1); // A3: le falta la Live
+        let c = r.candidatos_liberar(200, limite).unwrap();
+        assert_eq!(c.candidatos.iter().map(|c| c.asset_id.as_str()).collect::<Vec<_>>(), vec!["A1"]);
+        assert_eq!(c.candidatos[0].partes.len(), 2);
+        assert_eq!(c.no_verificados, 1); // A3: le falta la Live
+        assert_eq!(c.no_liberables, 0);
         r.marcar_borrado("A1", "2026-11-07T10:00:00-05:00").unwrap();
-        assert!(r.candidatos_liberar(200, limite).unwrap().0.is_empty());
+        assert!(r.candidatos_liberar(200, limite).unwrap().candidatos.is_empty());
+    }
+
+    #[test]
+    fn no_liberables_nunca_son_candidatos() {
+        let mut r = Registro::en_memoria().unwrap();
+        let mut a = asset("A1", "PrimarySync", VIEJO, &[(Original, 1)]);
+        a.liberable = false;
+        let b = asset("A2", "PrimarySync", VIEJO, &[(Original, 1), (Alternativa, 1)]);
+        listar(&mut r, &[a, b], 100);
+        for (id, t) in [("A1", Original), ("A2", Original), ("A2", Alternativa)] {
+            dar_por_copiado(&mut r, id, t);
+        }
+        let limite = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z").unwrap().timestamp();
+        let c = r.candidatos_liberar(100, limite).unwrap();
+        assert_eq!(c.candidatos.iter().map(|c| c.asset_id.as_str()).collect::<Vec<_>>(), vec!["A2"]);
+        assert_eq!(c.candidatos[0].partes.len(), 2);
+        assert_eq!((c.no_verificados, c.no_liberables), (0, 1));
+    }
+
+    #[test]
+    fn orden_de_partes_pendientes() {
+        let mut r = Registro::en_memoria().unwrap();
+        listar(&mut r, &[asset("A1", "PrimarySync", AGO, &[(Editada, 1), (Alternativa, 1), (Live, 1), (Original, 1)])], 100);
+        let tipos: Vec<_> = r.partes_pendientes(1000, None).unwrap().iter().map(|t| t.tipo).collect();
+        assert_eq!(tipos, vec![Original, Live, Alternativa, Editada]);
     }
 
     #[test]
     fn migra_base_antigua_sin_sha_pendiente() {
         let con = Connection::open_in_memory().unwrap();
-        con.execute_batch(&ESQUEMA.replace("  sha_pendiente TEXT,
-", "")).unwrap();
+        let viejo = ESQUEMA.replace("  sha_pendiente TEXT,
+", "").replace("borrado_icloud TEXT,
+  liberable INTEGER NOT NULL DEFAULT 1", "borrado_icloud TEXT");
+        con.execute_batch(&viejo).unwrap();
         assert!(con.prepare("SELECT sha_pendiente FROM partes").is_err());
+        assert!(con.prepare("SELECT liberable FROM assets").is_err());
         let r = Registro::con_esquema(con).unwrap();
         assert!(r.con.prepare("SELECT sha_pendiente FROM partes").is_ok());
+        assert!(r.con.prepare("SELECT liberable FROM assets").is_ok());
     }
 
     #[test]
