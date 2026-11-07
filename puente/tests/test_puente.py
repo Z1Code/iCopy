@@ -45,6 +45,11 @@ class ApiFalsa:
     def __init__(self, requires_2fa=False):
         self.requires_2fa = requires_2fa
         self.requires_2sa = False
+        self.pushes = 0
+
+    def trigger_push_notification(self):
+        self.pushes += 1
+        return True
 
     def validate_2fa_code(self, codigo):
         return codigo == "123456"
@@ -141,6 +146,14 @@ def test_login_y_codigo(salida):
         {"ok": False, "error": "codigo_incorrecto"},
         {"ok": True},
     ]
+    assert api.pushes == 1  # Apple solo envía el código si se le pide
+
+
+def test_login_sin_2fa_no_pide_codigo(salida):
+    api = ApiFalsa(requires_2fa=False)
+    p = pi.Puente("yo@x.com", "c", fabrica=lambda _pw: api)
+    p.manejar({"cmd": "login", "password": "x"})
+    assert api.pushes == 0
 
 
 def test_login_con_contrasena_mala():

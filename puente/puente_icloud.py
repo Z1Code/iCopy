@@ -240,8 +240,13 @@ class Puente:
         elif cmd == "login":
             self.api = None
             self.api = self.conectar(str(p["password"]))
-            responder({"ok": True,
-                       "requiere_2fa": bool(self.api.requires_2fa or self.api.requires_2sa)})
+            requiere_2fa = bool(self.api.requires_2fa or self.api.requires_2sa)
+            if requiere_2fa and hasattr(self.api, "trigger_push_notification"):
+                # Desde 2026 Apple solo envía el código a los dispositivos de confianza si se
+                # pide explícitamente (PUT /verify/trusteddevice/securitycode), como hace icloudpd.
+                if not self.api.trigger_push_notification():
+                    logging.warning("No se pudo pedir a Apple que envíe el código 2FA")
+            responder({"ok": True, "requiere_2fa": requiere_2fa})
         elif cmd == "codigo_2fa":
             if self.api is None:
                 raise SesionCaducada()
