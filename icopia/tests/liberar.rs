@@ -106,3 +106,17 @@ fn assets_con_datos_no_copiables_no_se_proponen() {
     assert!(plan.listos.is_empty());
     assert_eq!((plan.no_verificados, plan.no_liberables), (0, 1));
 }
+
+#[test]
+fn un_fallo_al_anotar_no_detiene_el_borrado_ni_pierde_registros() {
+    let mut e = escenario();
+    // El CSV no se puede escribir (en su lugar hay una carpeta).
+    std::fs::create_dir_all(e.dir.path().join(r".icopia\borrados.csv")).unwrap();
+    let plan = liberar::preparar(e.dir.path(), &e.reg, 30, motor::ahora(), &|_, _| {}).unwrap();
+    assert_eq!(plan.listos.len(), 2);
+    let r = liberar::ejecutar(e.dir.path(), &e.reg, &mut e.fuente, &plan.listos, &|_, _| {}).unwrap();
+    assert_eq!(r.borrados, 2);
+    assert_eq!(r.errores.len(), 2, "{:?}", r.errores);
+    let otra = liberar::preparar(e.dir.path(), &e.reg, 30, motor::ahora(), &|_, _| {}).unwrap();
+    assert!(otra.listos.is_empty(), "lo borrado queda anotado en el registro");
+}

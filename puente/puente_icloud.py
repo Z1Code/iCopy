@@ -268,9 +268,14 @@ class Puente:
         responder({"ok": True, "total": total, "omitidos": omitidos})
 
     def borrar(self, ids: List[str]) -> None:
+        """Responde siempre con lo hecho hasta el momento, aunque algo falle a mitad del lote."""
         borrados: List[str] = []
         fallidos: List[Dict[str, str]] = []
+        sesion_caducada = False
         for i in ids:
+            if sesion_caducada:
+                fallidos.append({"id": i, "error": "sesion_caducada"})
+                continue
             entrada = self.cache.get(i)
             if entrada is None:
                 fallidos.append({"id": i, "error": "no_listado"})
@@ -279,7 +284,16 @@ class Puente:
             if biblioteca != BIBLIOTECA_PERSONAL:
                 fallidos.append({"id": i, "error": "biblioteca_compartida"})
                 continue
-            error = self._borrador(lib, asset)
+            try:
+                error = self._borrador(lib, asset)
+            except Exception as e:  # noqa: BLE001 - nada debe perder lo ya borrado
+                if isinstance(e, SesionCaducada) or (
+                        isinstance(e, PyiCloudAPIResponseException) and es_error_de_sesion(e)):
+                    sesion_caducada = True
+                    error = "sesion_caducada"
+                else:
+                    logging.exception("fallo borrando %s", i)
+                    error = f"desconocido: {type(e).__name__}: {e}"
             if error:
                 fallidos.append({"id": i, "error": error})
             else:

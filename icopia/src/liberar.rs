@@ -23,6 +23,8 @@ pub struct PlanLiberar {
 pub struct ResumenBorrado {
     pub borrados: usize,
     pub fallidos: Vec<(String, String)>,
+    /// Borrados en iCloud que no se pudieron anotar del todo (CSV o registro): (id, motivo).
+    pub errores: Vec<(String, String)>,
 }
 
 /// Requiere un listado completo reciente (`marca_lista`): solo propone lo que sigue en iCloud.
@@ -61,16 +63,21 @@ fn motivo_exclusion(destino: &Path, c: &Candidato) -> Option<String> {
 
 pub fn ejecutar(destino: &Path, registro: &Mutex<Registro>, fuente: &mut dyn FuenteIcloud, listos: &[Candidato], avance: &dyn Fn(usize, usize)) -> Result<ResumenBorrado> {
     let csv = destino.join(".icopia").join("borrados.csv");
-    let mut resumen = ResumenBorrado { borrados: 0, fallidos: vec![] };
+    let mut resumen = ResumenBorrado { borrados: 0, fallidos: vec![], errores: vec![] };
     let mut hechos = 0;
     for lote in listos.chunks(TAMANO_LOTE) {
         let ids: Vec<String> = lote.iter().map(|c| c.asset_id.clone()).collect();
         let r = fuente.borrar(&ids).map_err(|e| anyhow!("borrando en iCloud: {e}"))?;
         let cuando = chrono::Local::now().to_rfc3339();
+        // Ya está borrado en iCloud: se anota todo lo posible y un fallo al anotar no detiene el resto.
         for id in &r.borrados {
             let Some(c) = lote.iter().find(|c| &c.asset_id == id) else { continue };
-            registro.lock().unwrap().marcar_borrado(id, &cuando)?;
-            anotar_csv(&csv, &cuando, c)?;
+            if let Err(e) = anotar_csv(&csv, &cuando, c) {
+                resumen.errores.push((id.clone(), format!("no se pudo anotar en {}: {e:#}", csv.display())));
+            }
+            if let Err(e) = registro.lock().unwrap().marcar_borrado(id, &cuando) {
+                resumen.errores.push((id.clone(), format!("no se pudo anotar en el registro: {e:#}")));
+            }
             resumen.borrados += 1;
         }
         resumen.fallidos.extend(r.fallidos);

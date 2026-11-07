@@ -294,3 +294,43 @@ def test_borrar_en_icloud_respuestas_dudosas_no_cuentan():
 def test_borrar_en_icloud_devuelve_el_error_del_servidor():
     r, _ = _borrar_con(Respuesta({"records": [{"recordName": "A1", "serverErrorCode": "CONFLICT"}]}))
     assert r == "CONFLICT"
+
+
+def _puente_con_cache(borrador, ids):
+    p = pi.Puente("yo@x.com", "c", fabrica=lambda _pw: ApiFalsa(), borrador=borrador)
+    p.cache = {i: ("PrimarySync", "lib", AssetFalso(id=i)) for i in ids}
+    return p
+
+
+def test_borrar_excepcion_en_medio_no_pierde_lo_hecho(salida):
+    intentados = []
+
+    def borrador(lib, a):
+        intentados.append(a.id)
+        if a.id == "A2":
+            raise ValueError("explota")
+        return None
+
+    p = _puente_con_cache(borrador, ["A1", "A2", "A3"])
+    p.manejar({"cmd": "borrar", "ids": ["A1", "A2", "A3"]})
+    assert intentados == ["A1", "A2", "A3"]
+    assert lineas(salida) == [{"ok": True, "borrados": ["A1", "A3"],
+                               "fallidos": [{"id": "A2", "error": "desconocido: ValueError: explota"}]}]
+
+
+def test_borrar_sesion_caducada_en_medio_responde_parcial(salida):
+    from pyicloud_ipd.exceptions import PyiCloudAPIResponseException
+    intentados = []
+
+    def borrador(lib, a):
+        intentados.append(a.id)
+        if a.id == "A2":
+            raise PyiCloudAPIResponseException("Authentication required", "401")
+        return None
+
+    p = _puente_con_cache(borrador, ["A1", "A2", "A3"])
+    p.manejar({"cmd": "borrar", "ids": ["A1", "A2", "A3"]})
+    assert intentados == ["A1", "A2"]
+    assert lineas(salida) == [{"ok": True, "borrados": ["A1"],
+                               "fallidos": [{"id": "A2", "error": "sesion_caducada"},
+                                            {"id": "A3", "error": "sesion_caducada"}]}]

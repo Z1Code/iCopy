@@ -345,6 +345,12 @@ fn cmd_liberar(args: &[String]) -> Result<()> {
             println!("  - {id}: {e}");
         }
     }
+    if !r.errores.is_empty() {
+        println!("ATENCIÓN: {} borrados no se pudieron anotar del todo:", r.errores.len());
+        for (id, e) in r.errores.iter().take(10) {
+            println!("  - {id}: {e}");
+        }
+    }
     println!("Registro de lo borrado: {}", dir_datos.join("borrados.csv").display());
     println!("Para liberar el espacio ya: iPhone → Fotos → Eliminado recientemente → Eliminar todo.");
     Ok(())
