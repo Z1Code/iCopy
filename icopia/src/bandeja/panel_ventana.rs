@@ -49,6 +49,8 @@ unsafe extern "system" fn gancho_raton(codigo: i32, w: usize, l: isize) -> isize
 /// Pone hwnd en primer plano aunque Windows lo restrinja a otro proceso: se engancha un
 /// momento a la cola de entrada del hilo que tiene el primer plano. Así un menú o panel recibe
 /// la desactivación (y se cierra) al hacer clic fuera.
+// `hwnd` es un identificador de ventana que Windows valida: uno inválido solo hace fallar la llamada.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn traer_al_frente(hwnd: HWND) {
     use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
     use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow};

@@ -229,6 +229,7 @@ fn bucle(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn una_ronda(
     cfg: &Config,
     http: &Client,

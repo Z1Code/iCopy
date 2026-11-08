@@ -686,7 +686,7 @@ mod tests {
     fn relistar_sin_cambios_conserva_lo_verificado() {
         let mut r = Registro::en_memoria().unwrap();
         let a = asset("A1", "PrimarySync", AGO, &[(Original, 10)]);
-        listar(&mut r, &[a.clone()], 100);
+        listar(&mut r, std::slice::from_ref(&a), 100);
         dar_por_copiado(&mut r, "A1", Original);
         listar(&mut r, &[a], 200);
         assert!(r.partes_pendientes(1000, None).unwrap().is_empty());
@@ -830,7 +830,7 @@ mod tests {
     fn actualizar_enlaces_no_cambia_la_marca_ni_crea_nada() {
         let mut r = Registro::en_memoria().unwrap();
         let a = asset("A1", "PrimarySync", "2026-08-10T19:37:18-04:00", &[(Original, 10)]);
-        listar(&mut r, &[a.clone()], 1000);
+        listar(&mut r, std::slice::from_ref(&a), 1000);
         r.registrar_fallo("A1", Original, "enlace de descarga caducado (HTTP 410)", 1000).unwrap();
         let mut nuevo = a.clone();
         nuevo.partes[0].url = "http://x/nuevo?e=99".into();

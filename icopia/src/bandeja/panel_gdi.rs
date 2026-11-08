@@ -212,6 +212,7 @@ impl Lienzo {
     }
 
     /// Rectángulo redondeado suavizado (coordenadas en píxeles físicos).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn caja(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, c: Rgb, alfa: f32) {
         let (ancho, alto) = (self.ancho, self.alto);
         let px = self.pixeles_mut();

@@ -150,9 +150,9 @@ pub fn pintar(n: u32, p: Paleta) -> Vec<u8> {
             let t = ((cy + cx * 0.4) / (32.0 * 1.4)).clamp(0.0, 1.0);
             let blanco = glifo as f32 / fondo as f32;
             let mut rgb = [0u8; 3];
-            for i in 0..3 {
+            for (i, canal) in rgb.iter_mut().enumerate() {
                 let base = p.claro[i] as f32 + (p.oscuro[i] as f32 - p.claro[i] as f32) * t;
-                rgb[i] = (base + (255.0 - base) * blanco).round() as u8;
+                *canal = (base + (255.0 - base) * blanco).round() as u8;
             }
             let alfa = (fondo as f32 / total * 255.0).round() as u8;
             v.extend_from_slice(&[rgb[0], rgb[1], rgb[2], alfa]);

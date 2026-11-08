@@ -63,7 +63,7 @@ fn sondear_registro(abierto: Arc<AtomicBool>, proxy: tao::event_loop::EventLoopP
             vuelta += 1;
             // Panel o asistente abiertos: lectura completa cada segundo.
             let panel = abierto.load(Ordering::Relaxed);
-            if !panel && vuelta % 5 != 0 {
+            if !panel && !vuelta.is_multiple_of(5) {
                 continue;
             }
             let Some(ruta) = Config::cargar().ok().and_then(|c| c.destino).map(|d| d.join(".icopia").join("registro.db")) else { continue };

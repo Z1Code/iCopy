@@ -166,7 +166,7 @@ pub fn listar_en_registro(
             return false;
         }
         vistos += 1;
-        if vistos % 25 == 0 {
+        if vistos.is_multiple_of(25) {
             avance(Avance::Listando { vistos });
         }
         true

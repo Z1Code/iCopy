@@ -48,10 +48,8 @@ pub fn servidor(rutas: Vec<(&str, Comportamiento)>) -> Servidor {
     let registro = peticiones.clone();
     std::thread::spawn(move || {
         let mut cortadas: HashMap<String, bool> = HashMap::new();
-        for stream in listener.incoming() {
-            if let Ok(s) = stream {
-                atender(s, &mapa, &registro, &mut cortadas);
-            }
+        for s in listener.incoming().flatten() {
+            atender(s, &mapa, &registro, &mut cortadas);
         }
     });
     Servidor { base, peticiones }

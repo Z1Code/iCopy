@@ -281,7 +281,7 @@ pub fn pintar(l: &mut Lienzo, a: &Asistente, oscuro: bool, escala: f32, t_seg: f
                 }
             }
             Revision::Error(m) => {
-                texto(dc, &f.h, &tf(T::AsRevisionFallo, &[("e", &"")]).trim_end_matches([':', ' ']), p.naranja, (x0, e(124), ancho_util, e(24)), Alinear::Izq);
+                texto(dc, &f.h, tf(T::AsRevisionFallo, &[("e", &"")]).trim_end_matches([':', ' ']), p.naranja, (x0, e(124), ancho_util, e(24)), Alinear::Izq);
                 texto_envuelto(dc, &f.norm, m, p.texto, (x0, e(156), ancho_util, e(120)));
             }
         },
