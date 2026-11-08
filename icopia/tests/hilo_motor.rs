@@ -34,7 +34,8 @@ fn primera_ronda_copia_y_avisa() {
     let (mut aviso, mut al_dia) = (false, false);
     while Instant::now() < limite && !(aviso && al_dia) {
         match rx_ev.recv_timeout(Duration::from_secs(1)) {
-            Ok(EventoUi::Aviso { texto, .. }) if texto.starts_with("1 archivos") => aviso = true,
+            // El texto sale en el idioma del sistema: español o inglés.
+            Ok(EventoUi::Aviso { texto, .. }) if texto.starts_with("1 archivos") || texto.starts_with("1 new files") => aviso = true,
             Ok(EventoUi::Estado(e)) if e.fase == Fase::Inactiva && e.verificadas == 1 && e.total == 1 => al_dia = true,
             _ => {}
         }
