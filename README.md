@@ -4,6 +4,8 @@
 
 # iCopy
 
+[![CI](https://github.com/Z1Code/iCopy/actions/workflows/ci.yml/badge.svg)](https://github.com/Z1Code/iCopy/actions/workflows/ci.yml) [![Última versión](https://img.shields.io/github/v/release/Z1Code/iCopy)](https://github.com/Z1Code/iCopy/releases/latest)
+
 **Copia de seguridad de iCloud Fotos para Windows: completa, verificada y sin cortes.**
 
 iCopy (internamente `icopia`) es una app de la bandeja de Windows que baja **todos los originales**
@@ -92,14 +94,40 @@ iCopy **nunca borra nada de iCloud por su cuenta**. "Liberar espacio" es un paso
 
 ## Instalación
 
-Requisitos: Windows 10 u 11 (probado en Windows 11), [Rust](https://rustup.rs) (toolchain MSVC), Python 3.11 y Git.
+1. Descarga **`iCopy-Setup-X.Y.Z.exe`** de [Releases](https://github.com/Z1Code/iCopy/releases/latest) y ábrelo.
+2. Windows puede mostrar «SmartScreen: editor desconocido», porque el instalador aún no lleva firma de
+   Windows. Pulsa **Más información → Ejecutar de todas formas**. Cada versión sí va firmada con una
+   clave propia y las actualizaciones la comprueban (abajo).
+
+Requisitos: Windows 10 u 11 (probado en Windows 11). No pide permisos de administrador: instala en
+`%LOCALAPPDATA%\Programs\icopia\`, añade iCopy al menú Inicio, puede arrancar con Windows y se
+desinstala desde *Configuración → Aplicaciones* (tus fotos, tu configuración y tu sesión se conservan;
+el desinstalador te pregunta si quieres borrar también la configuración y la sesión).
+
+Al primer arranque, elige la carpeta destino e inicia sesión en la ventana de iCloud (Apple ID,
+contraseña y el código de 6 dígitos de tu iPhone). La contraseña no se guarda; la sesión sí, en
+`%APPDATA%\icopia\sesion\`, y la configuración en `%APPDATA%\icopia\config.json`.
+
+### Actualizaciones
+
+iCopy busca versiones nuevas al arrancar y una vez al día en [Releases](https://github.com/Z1Code/iCopy/releases).
+Descarga el instalador en segundo plano y **solo lo usa si su firma es válida**. Por defecto lo instala
+solo cuando no hay nada en marcha (ni copia, ni pausa, ni «Liberar espacio», ni ventanas abiertas) y
+se vuelve a abrir. Nunca actualiza mientras se borra en iCloud. En el menú del icono puedes
+desactivar *Actualizar automáticamente* (te avisa y tú eliges cuándo: *Reiniciar y actualizar*) o
+pulsar *Buscar actualizaciones*. Los cambios de cada versión están en el [CHANGELOG](CHANGELOG.md).
+
+### Desde el código
+
+Requisitos: [Rust](https://rustup.rs) (toolchain MSVC), Python 3.11 y Git.
 
 ```powershell
 git clone https://github.com/Z1Code/iCopy.git
 cd iCopy
 py -3.11 -m venv puente\.venv
 puente\.venv\Scripts\pip install -r puente\requirements.txt
-.\instalar.ps1
+.\instalar.ps1      # compila e instala directamente
+.\empaquetar.ps1    # o genera dist\iCopy-Setup-X.Y.Z.exe (necesita Inno Setup 6)
 ```
 
 `instalar.ps1`:
@@ -109,10 +137,6 @@ puente\.venv\Scripts\pip install -r puente\requirements.txt
 - los copia a `%LOCALAPPDATA%\Programs\icopia\`;
 - registra el arranque con Windows (`HKCU\...\Run`, valor `icopia`; se desactiva desde el menú);
 - abre la app en la bandeja.
-
-Al primer arranque, elige la carpeta destino e inicia sesión en la ventana de iCloud (Apple ID,
-contraseña y el código de 6 dígitos de tu iPhone). La contraseña no se guarda; la sesión sí, en
-`%APPDATA%\icopia\sesion\`, y la configuración en `%APPDATA%\icopia\config.json`.
 
 ## Uso
 
@@ -127,6 +151,8 @@ contraseña y el código de 6 dígitos de tu iPhone). La contraseña no se guard
 | Cambiar destino… | Elige otra carpeta o disco |
 | Iniciar sesión en iCloud… | Abre la ventana de inicio de sesión (2FA) |
 | Iniciar con Windows | Activa o desactiva el arranque automático |
+| Actualizar automáticamente | Instala solas las versiones nuevas cuando no hay nada en marcha |
+| Buscar actualizaciones | Busca ahora; si hay una lista, «Reiniciar y actualizar a X.Y.Z» |
 
 **Liberar espacio en iCloud** (menú, o botón «Liberar espacio» del panel con la copia al día) abre un
 asistente en cinco pasos: *Elegir* (conservar los últimos 30 días, 3, 6 o 12 meses, 2 o 3 años, o
@@ -143,6 +169,7 @@ proceso se cierra a medias se muestra como interrumpido.
 **Línea de comandos** (`icopia.exe`):
 
 ```
+icopia --version                Muestra la versión
 icopia destino <carpeta>       Fija la carpeta donde se guardan las fotos
 icopia login                   Inicia sesión en iCloud (contraseña + código 2FA)
 icopia diagnostico             Comprueba la sesión y que las descargas funcionan
@@ -205,4 +232,4 @@ interruption, and renews iCloud's ~15-minute download links in batches. A hover/
 progress, speed and ETA. Optionally it frees iCloud space, deleting **only** re-verified items after you
 type `BORRAR`, keeping the last 30 days and never touching the Shared Library (deleted items stay 30 days
 in "Recently Deleted"). Built with Rust plus a small Python bridge using icloudpd's `pyicloud_ipd`.
-UI is in Spanish. Not affiliated with Apple. MIT licensed.
+UI is in Spanish and English. Installs per user with a signed-update installer (`iCopy-Setup-X.Y.Z.exe` from Releases) and updates itself, verifying each release signature. Not affiliated with Apple. MIT licensed.

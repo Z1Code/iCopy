@@ -25,6 +25,8 @@ icopia/                 crate Rust (lib + 3 binarios)
   src/progreso_liberar.rs  avance del borrado en el registro (meta `liberar_progreso`) para la bandeja
   src/i18n.rs           textos en español e inglés (todas las claves en los dos idiomas)
   src/puente.rs         cliente del puente Python (JSON por líneas, stdin/stdout)
+  src/actualizar.rs     actualizaciones: elegir versión en GitHub Releases, firma ed25519, descargar, aplicar
+  src/bandeja/hilo_actualizar.rs  hilo que busca/descarga; decide si hay un liberar vivo
   src/bandeja/          estado, panel (vista + dibujo GDI), asistente de liberar (modelo, dibujo,
                         ventana; el trabajo lo hace hilo_liberar en el hilo del motor), icono, avisos
   examples/             panel_demo, panel_social, asistente_demo, generar_icono (renders sin datos reales)
@@ -32,7 +34,11 @@ icopia/                 crate Rust (lib + 3 binarios)
 puente/                 puente Python sobre pyicloud_ipd (icloudpd, versión fija)
   puente_icloud.py, tests/, build.ps1 (PyInstaller → dist/puente-icloud.exe)
 docs/social/            imágenes del README y su generador (generar.py)
-instalar.ps1            compila e instala en %LOCALAPPDATA%\Programs\icopia
+instalar.ps1            compila e instala en %LOCALAPPDATA%\Programs\icopia (desarrollo)
+empaquetar.ps1          genera dist\iCopy-Setup-X.Y.Z.exe con instalador\icopy.iss (Inno Setup 6)
+instalador/             script de Inno Setup (por usuario, sin administrador)
+.github/workflows/      ci.yml (clippy + pruebas en cada push) y publicar.yml (etiqueta vX.Y.Z → release firmada)
+CHANGELOG.md            cambios por versión (Keep a Changelog, SemVer)
 ```
 
 ## Comandos
@@ -83,6 +89,29 @@ Si estás instalando o configurando iCopy para alguien: **pregúntale su Apple I
 él mismo la contraseña y el código de 6 dígitos** que aparece en su iPhone. No pidas ni manejes la
 contraseña ni el código, no los pongas en scripts, variables de entorno ni en el historial de la terminal.
 Si su cuenta tiene Protección avanzada de datos, debe activar en el iPhone "Acceder a datos de iCloud en la web".
+
+## Publicar una versión
+
+La versión vive **solo** en `icopia/Cargo.toml`. Para publicar `X.Y.Z`:
+
+1. Sube `version` en `icopia/Cargo.toml`; mueve lo de *Sin publicar* a una sección `## [X.Y.Z] - fecha`
+   del `CHANGELOG.md` (la publicación falla si no existe).
+2. `cargo clippy --all-targets -- -D warnings`, `cargo test` y `pytest puente\tests` en verde.
+3. Commit, etiqueta `vX.Y.Z` (con `-` en el nombre, p. ej. `v0.3.0-rc.1`, sale como *pre-release* y
+   las instalaciones **no** la reciben) y `git push origin vX.Y.Z`. Publicar es público e irreversible
+   para quien ya actualizó: **pide confirmación a la persona** antes de empujar la etiqueta.
+4. `publicar.yml` prueba, empaqueta, firma (secreto `ICOPY_CLAVE_FIRMA`) y crea la release con el
+   `.exe` y su `.sig`. Las instalaciones se actualizan solas leyendo `releases/latest`.
+
+**La clave privada de firma** (`%USERPROFILE%\.icopy\clave-firma-actualizaciones.txt`, y el secreto de
+GitHub) **nunca** va al repo, a logs, a variables de entorno persistentes ni a la salida de comandos. La
+pública está en `icopia/recursos/clave_actualizaciones.pub`; si cambia, las instalaciones existentes dejan
+de aceptar actualizaciones. Las compilaciones desde `target\` no se actualizan solas
+(`ICOPIA_URL_ACTUALIZACIONES` apunta a un servidor de pruebas).
+
+La CI usa el Rust *stable* actual, que puede ser más nuevo que el local: si falla `clippy` por un lint
+nuevo, corrígelo (también con `cargo +<versión> clippy`). Las pruebas de integración ven el idioma real del
+sistema: no compares textos de la interfaz en un solo idioma.
 
 ## Commits
 
