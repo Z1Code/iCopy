@@ -41,7 +41,7 @@ fn primera_ronda_copia_y_avisa() {
         }
     }
     assert!(aviso && al_dia, "aviso={aviso} al_dia={al_dia}");
-    assert!(destino.path().join(r"2026\2026-08\IMG_0001.JPG").exists());
+    assert!(icopia::layout::en_disco(destino.path(), r"2026\2026-08\IMG_0001.JPG").exists());
     tx.send(Orden::Salir).unwrap();
     h.join().unwrap();
 }
@@ -88,7 +88,7 @@ fn pausar_que_llega_justo_antes_de_la_ronda_no_se_pierde() {
     h.join().unwrap();
     assert!(pausada);
     assert_eq!(aperturas.load(Ordering::SeqCst), 0, "no debe empezar una ronda estando en pausa");
-    assert!(!destino.path().join(r"2026\2026-08\IMG_0001.JPG").exists());
+    assert!(!icopia::layout::en_disco(destino.path(), r"2026\2026-08\IMG_0001.JPG").exists());
 }
 
 /// Fuente falsa compartida entre aperturas (como la cuenta de iCloud real: lo borrado sigue borrado).
@@ -158,7 +158,7 @@ fn liberar_desde_la_bandeja_revisa_borra_y_restaura() {
     let Some(EventoUi::Liberar(EventoLiberar::Plan(plan))) = esperar(&|e| matches!(e, EventoUi::Liberar(_))) else { panic!("sin plan") };
     assert_eq!((plan.elementos, plan.bytes), (1, d1.len() as u64));
     assert!(plan.lista.as_ref().is_some_and(|l| l.exists()));
-    let reg = icopia::registro::Registro::abrir_lectura(&destino.path().join(r".icopia\registro.db")).unwrap();
+    let reg = icopia::registro::Registro::abrir_lectura(&icopia::layout::en_disco(destino.path(), r".icopia\registro.db")).unwrap();
     assert_eq!(progreso_liberar::leer(&reg).unwrap().fase, FaseLiberar::Confirmando);
     tx.send(Orden::LiberarEjecutar).unwrap();
     let Some(EventoUi::Liberar(EventoLiberar::Terminado(fin))) = esperar(&|e| matches!(e, EventoUi::Liberar(_))) else { panic!("sin final") };

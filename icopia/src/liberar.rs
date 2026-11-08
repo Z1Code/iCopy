@@ -1,6 +1,7 @@
 //! Liberar espacio: borrar de iCloud solo lo copiado, verificado y re-verificado.
 use crate::criterio::Criterio;
 use crate::fuente::FuenteIcloud;
+use crate::layout;
 use crate::progreso_liberar::{self, FaseLiberar, Seguimiento};
 use crate::registro::{Candidato, Registro};
 use crate::verificar;
@@ -179,7 +180,7 @@ fn bytes_de(c: &Candidato) -> u64 {
 
 fn motivo_exclusion(destino: &Path, c: &Candidato) -> Option<String> {
     for p in &c.partes {
-        match verificar::reverificar(&destino.join(&p.ruta), p.tamano, &p.extension, p.estructura_atipica) {
+        match verificar::reverificar(&layout::en_disco(destino, &p.ruta), p.tamano, &p.extension, p.estructura_atipica) {
             Ok(sha) if sha == p.sha256 => {}
             Ok(_) => return Some(format!("{}: el contenido cambió (SHA-256 distinto)", p.ruta)),
             Err(f) => return Some(format!("{}: {f}", p.ruta)),

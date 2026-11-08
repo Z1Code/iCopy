@@ -1,6 +1,7 @@
 //! Dónde va cada archivo: <destino>\AAAA\AAAA-MM\<nombre>.
 use crate::modelo::TipoParte;
 use chrono::{DateTime, Datelike, FixedOffset};
+use std::path::{Path, PathBuf};
 
 pub fn sanear(nombre: &str) -> String {
     let s: String = nombre
@@ -13,6 +14,14 @@ pub fn sanear(nombre: &str) -> String {
 
 pub fn fecha(texto: &str) -> anyhow::Result<DateTime<FixedOffset>> {
     Ok(DateTime::parse_from_rfc3339(texto)?)
+}
+
+/// Ruta en disco de una ruta relativa del registro. En el registro se guardan siempre con `\`
+/// (formato estable, el mismo disco sirve en Windows y en macOS); aquí se parten por componentes para
+/// que en macOS sean carpetas y no un archivo con barras invertidas en el nombre. Los componentes nunca
+/// contienen `\` ni `/` (`sanear` los sustituye).
+pub fn en_disco(destino: &Path, rel: &str) -> PathBuf {
+    rel.split('\\').filter(|c| !c.is_empty()).fold(destino.to_path_buf(), |p, c| p.join(c))
 }
 
 pub fn carpeta_relativa(f: &DateTime<FixedOffset>) -> String {
@@ -73,6 +82,15 @@ pub fn elegir_ruta(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ruta_en_disco_separa_por_componentes() {
+        let base = Path::new("base");
+        let p = en_disco(base, r"2026\2026-08\IMG_0001.HEIC");
+        let comps: Vec<_> = p.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+        assert_eq!(comps, ["base", "2026", "2026-08", "IMG_0001.HEIC"]);
+        assert_eq!(p, base.join("2026").join("2026-08").join("IMG_0001.HEIC"));
+    }
 
     #[test]
     fn sanea_caracteres_prohibidos() {

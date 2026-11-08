@@ -455,7 +455,7 @@ fn procesar_parte(destino: &Path, registro: &Mutex<Registro>, http: &Client, t: 
             let rel = {
                 let consulta = &*reg;
                 layout::elegir_ruta(&t.nombre_base, &t.asset_id, &t.fecha, t.tipo, &t.extension, &mut |clave| {
-                    let en_disco = destino.join(clave);
+                    let en_disco = layout::en_disco(destino, clave);
                     consulta.ruta_ocupada(clave).unwrap_or(true) || en_disco.exists() || descarga::ruta_part(&en_disco).exists()
                 })
                 .map_err(|e| ErrorParte::Ruta(e.to_string()))?
@@ -464,7 +464,7 @@ fn procesar_parte(destino: &Path, registro: &Mutex<Registro>, http: &Client, t: 
             rel
         }
     };
-    let final_ = destino.join(&rel);
+    let final_ = layout::en_disco(destino, &rel);
     if let Some(p) = final_.parent() {
         std::fs::create_dir_all(p).map_err(|e| ErrorParte::Disco(e.to_string()))?;
     }

@@ -1,4 +1,5 @@
 //! "Verificar todo": re-comprueba lo copiado y reprograma lo dañado o ausente.
+use crate::layout;
 use crate::registro::Registro;
 use crate::verificar;
 use std::path::Path;
@@ -25,7 +26,7 @@ pub fn verificar_todo(
         if cancelar.load(Ordering::Relaxed) {
             break;
         }
-        let motivo = match verificar::reverificar(&destino.join(&p.ruta), p.tamano, &p.extension, p.estructura_atipica) {
+        let motivo = match verificar::reverificar(&layout::en_disco(destino, &p.ruta), p.tamano, &p.extension, p.estructura_atipica) {
             Ok(sha) if sha == p.sha256 => None,
             Ok(_) => Some("el contenido cambió (SHA-256 distinto)".to_string()),
             Err(f) => Some(f.to_string()),
@@ -46,7 +47,7 @@ pub fn verificar_todo(
 /// Mueve un archivo dañado a `<destino>\.icopia\danados\<unix>_<nombre>` para que nunca se
 /// vuelva a adoptar como bueno. Si ya no existe, no hace nada.
 fn apartar_danado(destino: &Path, ruta_rel: &str) -> std::io::Result<()> {
-    let origen = destino.join(ruta_rel);
+    let origen = layout::en_disco(destino, ruta_rel);
     if !origen.exists() {
         return Ok(());
     }

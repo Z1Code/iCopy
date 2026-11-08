@@ -60,7 +60,7 @@ fn reanuda_tras_corte() {
     assert_eq!(ronda(d.path(), &reg, &mut f).fallidas, 1);
     reg.lock().unwrap().reintentar_ya().unwrap();
     assert_eq!(ronda(d.path(), &reg, &mut f).verificadas, 1);
-    assert_eq!(std::fs::read(d.path().join(r"2026\2026-08\IMG_0001.HEIC")).unwrap(), h);
+    assert_eq!(std::fs::read(icopia::layout::en_disco(d.path(), r"2026\2026-08\IMG_0001.HEIC")).unwrap(), h);
     assert!(s.peticiones_a("/h")[1].rango.is_some());
 }
 
@@ -100,7 +100,7 @@ fn estructura_atipica_constante_se_acepta_por_doble_descarga() {
     let reg = nuevo_registro();
     let r = ronda(d.path(), &reg, &mut f);
     assert_eq!((r.verificadas, r.fallidas), (1, 0));
-    let carpeta = d.path().join(r"2026\2026-08");
+    let carpeta = icopia::layout::en_disco(d.path(), r"2026\2026-08");
     assert_eq!(std::fs::read(carpeta.join("IMG_0001.JPG")).unwrap(), j);
     sin_temporales(&carpeta);
     let p = s.peticiones_a("/j");
@@ -149,7 +149,7 @@ fn dos_descargas_distintas_se_rechazan() {
     let r = ronda(d.path(), &reg, &mut f);
     assert_eq!((r.verificadas, r.fallidas), (0, 1));
     assert_eq!(s.peticiones_a("/j").len(), 2);
-    let carpeta = d.path().join(r"2026\2026-08");
+    let carpeta = icopia::layout::en_disco(d.path(), r"2026\2026-08");
     assert!(!carpeta.join("IMG_0001.JPG").exists());
     sin_temporales(&carpeta);
     let e = errores(&reg);
@@ -190,7 +190,7 @@ fn colision_de_nombres_no_pisa() {
     };
     let d = tempfile::tempdir().unwrap();
     assert_eq!(ronda_con(d.path(), &nuevo_registro(), &mut f, 1, None).verificadas, 2);
-    let carpeta = d.path().join(r"2026\2026-08");
+    let carpeta = icopia::layout::en_disco(d.path(), r"2026\2026-08");
     assert_eq!(std::fs::read(carpeta.join("IMG_0001.JPG")).unwrap(), a);
     assert_eq!(std::fs::read(carpeta.join("IMG_0001 (bq9zzz).JPG")).unwrap(), b);
 }
@@ -261,7 +261,7 @@ fn un_part_ajeno_ocupa_el_nombre() {
     let s = servidor(vec![("/j", Comportamiento::Servir(j.clone()))]);
     let mut f = FuenteFalsa { assets: vec![asset("A1xxxx", "IMG_0001", AGO, "PrimarySync", vec![parte(TipoParte::Original, &j, s.url("/j"), "JPG")])], ..Default::default() };
     let d = tempfile::tempdir().unwrap();
-    let carpeta = d.path().join(r"2026\2026-08");
+    let carpeta = icopia::layout::en_disco(d.path(), r"2026\2026-08");
     std::fs::create_dir_all(&carpeta).unwrap();
     std::fs::write(carpeta.join("IMG_0001.JPG.part"), b"de otro").unwrap();
     assert_eq!(ronda(d.path(), &nuevo_registro(), &mut f).verificadas, 1);
@@ -290,7 +290,7 @@ fn edicion_nueva_no_reanuda_el_part_viejo() {
     reg.lock().unwrap().reintentar_ya().unwrap();
     assert_eq!(ronda(d.path(), &reg, &mut f).verificadas, 1);
     assert_eq!(s.peticiones_a("/n")[0].rango, None);
-    let final_ = d.path().join(r"2026\2026-08\IMG_0001.HEIC");
+    let final_ = icopia::layout::en_disco(d.path(), r"2026\2026-08\IMG_0001.HEIC");
     assert_eq!(std::fs::read(&final_).unwrap(), nuevo);
     assert!(!descarga::ruta_meta(&descarga::ruta_part(&final_)).exists());
 }

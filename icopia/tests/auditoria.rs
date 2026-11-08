@@ -26,7 +26,7 @@ fn detecta_archivos_danados_y_ausentes_y_los_reprograma() {
     let reg = Mutex::new(Registro::en_memoria().unwrap());
     let op = OpcionesRonda { concurrencia: 2, mes: None };
     motor::ejecutar_ronda(d.path(), &reg, &mut f, &descarga::cliente(), &op, &AtomicBool::new(false), &|_: Avance| {}).unwrap();
-    let carpeta = d.path().join(r"2026\2026-08");
+    let carpeta = icopia::layout::en_disco(d.path(), r"2026\2026-08");
     let mut danado = b.clone();
     danado[10] ^= 0xFF; // mismo tamaño, contenido distinto
     std::fs::write(carpeta.join("IMG_B.JPG"), danado).unwrap();
@@ -56,7 +56,7 @@ fn atipico_confirmado_se_reverifica_por_sha_sin_estructura() {
     let r = auditoria::verificar_todo(d.path(), &reg, &AtomicBool::new(false), &|_, _| {}).unwrap();
     assert_eq!((r.revisadas, r.malas.len()), (1, 0), "{:?}", r.malas);
 
-    let ruta = d.path().join(r"2026\2026-08\IMG_A.JPG");
+    let ruta = icopia::layout::en_disco(d.path(), r"2026\2026-08\IMG_A.JPG");
     let mut danado = j.clone();
     danado[100] ^= 0x01;
     std::fs::write(&ruta, &danado).unwrap();
@@ -76,14 +76,14 @@ fn archivo_danado_se_vuelve_a_descargar_y_no_se_readopta() {
     let op = OpcionesRonda { concurrencia: 1, mes: None };
     motor::ejecutar_ronda(d.path(), &reg, &mut f, &descarga::cliente(), &op, &AtomicBool::new(false), &|_: Avance| {}).unwrap();
     assert_eq!(s.total_peticiones(), 1);
-    let ruta = d.path().join(r"2026\2026-08\IMG_B.JPG");
+    let ruta = icopia::layout::en_disco(d.path(), r"2026\2026-08\IMG_B.JPG");
     let mut danado = b.clone();
     danado[10] ^= 0xFF; // mismo tamaño, estructura intacta
     std::fs::write(&ruta, &danado).unwrap();
 
     let r = auditoria::verificar_todo(d.path(), &reg, &AtomicBool::new(false), &|_, _| {}).unwrap();
     assert_eq!(r.malas.len(), 1);
-    let apartados: Vec<_> = std::fs::read_dir(d.path().join(r".icopia\danados")).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+    let apartados: Vec<_> = std::fs::read_dir(icopia::layout::en_disco(d.path(), r".icopia\danados")).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
     assert_eq!(apartados.len(), 1);
     assert!(apartados[0].ends_with("_IMG_B.JPG"), "{apartados:?}");
 
@@ -104,7 +104,7 @@ fn archivo_danado_no_apartado_tampoco_se_readopta() {
     let reg = Mutex::new(Registro::en_memoria().unwrap());
     let op = OpcionesRonda { concurrencia: 1, mes: None };
     motor::ejecutar_ronda(d.path(), &reg, &mut f, &descarga::cliente(), &op, &AtomicBool::new(false), &|_: Avance| {}).unwrap();
-    let ruta = d.path().join(r"2026\2026-08\IMG_B.JPG");
+    let ruta = icopia::layout::en_disco(d.path(), r"2026\2026-08\IMG_B.JPG");
     let mut danado = b.clone();
     danado[10] ^= 0xFF;
     std::fs::write(&ruta, &danado).unwrap();

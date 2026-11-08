@@ -48,7 +48,7 @@ fn escenario() -> Escenario {
 fn prepara_solo_lo_seguro_y_borra() {
     let mut e = escenario();
     // V2 se altera en disco después de verificarse
-    let ruta_v2 = e.dir.path().join(r"2025\2025-01\IMG_V2.JPG");
+    let ruta_v2 = icopia::layout::en_disco(e.dir.path(), r"2025\2025-01\IMG_V2.JPG");
     let mut v2 = std::fs::read(&ruta_v2).unwrap();
     v2[15] ^= 0xFF;
     std::fs::write(&ruta_v2, v2).unwrap();
@@ -62,13 +62,27 @@ fn prepara_solo_lo_seguro_y_borra() {
     let r = liberar::ejecutar(e.dir.path(), &e.reg, &mut e.fuente, &plan.listos, &|_, _| {}).unwrap();
     assert_eq!(r.borrados, 1);
     assert_eq!(e.fuente.borrados, vec!["V1"]);
-    let csv = std::fs::read_to_string(e.dir.path().join(r".icopia\borrados.csv")).unwrap();
+    let csv = std::fs::read_to_string(icopia::layout::en_disco(e.dir.path(), r".icopia\borrados.csv")).unwrap();
     assert!(csv.starts_with("fecha_borrado,asset_id,nombre,fecha_captura,archivos"));
     assert!(csv.contains("\"V1\""));
-    assert!(e.dir.path().join(r"2025\2025-01\IMG_V1.JPG").exists(), "nunca se borra del PC");
+    assert!(icopia::layout::en_disco(e.dir.path(), r"2025\2025-01\IMG_V1.JPG").exists(), "nunca se borra del PC");
 
     let otra = liberar::preparar(e.dir.path(), &e.reg, 30, motor::ahora(), &|_, _| {}).unwrap();
     assert!(otra.listos.is_empty());
+}
+
+#[test]
+fn las_copias_van_en_carpetas_reales_y_se_reverifican_ahi() {
+    // En macOS, una ruta del registro con `\` unida tal cual crearía un archivo con barras invertidas
+    // en el nombre. Las copias deben estar en carpetas de verdad (separador del sistema) y la
+    // re-verificación previa al borrado debe encontrarlas ahí.
+    let e = escenario();
+    let carpeta = e.dir.path().join("2025").join("2025-01");
+    assert!(carpeta.join("IMG_V1.JPG").is_file());
+    assert!(carpeta.join("IMG_V2.JPG").is_file());
+    let plan = liberar::preparar(e.dir.path(), &e.reg, 30, motor::ahora(), &|_, _| {}).unwrap();
+    assert_eq!(plan.listos.iter().map(|c| c.asset_id.as_str()).collect::<Vec<_>>(), vec!["V1", "V2"]);
+    assert!(plan.excluidos.is_empty(), "{:?}", plan.excluidos.iter().map(|(_, m)| m).collect::<Vec<_>>());
 }
 
 #[test]
@@ -133,7 +147,7 @@ fn atipicos_confirmados_por_doble_descarga_son_liberables() {
 fn un_fallo_al_anotar_no_detiene_el_borrado_ni_pierde_registros() {
     let mut e = escenario();
     // El CSV no se puede escribir (en su lugar hay una carpeta).
-    std::fs::create_dir_all(e.dir.path().join(r".icopia\borrados.csv")).unwrap();
+    std::fs::create_dir_all(icopia::layout::en_disco(e.dir.path(), r".icopia\borrados.csv")).unwrap();
     let plan = liberar::preparar(e.dir.path(), &e.reg, 30, motor::ahora(), &|_, _| {}).unwrap();
     assert_eq!(plan.listos.len(), 2);
     let r = liberar::ejecutar(e.dir.path(), &e.reg, &mut e.fuente, &plan.listos, &|_, _| {}).unwrap();
@@ -192,10 +206,10 @@ fn por_anios_y_restaurar_la_sesion() {
     let lista = liberar::escribir_plan_csv(e.dir.path(), &plan).unwrap();
     assert_eq!(std::fs::read_to_string(lista).unwrap().lines().count(), 3);
     // borrados.csv de una versión anterior: se le añade la columna de sesión.
-    std::fs::write(e.dir.path().join(r".icopia\borrados.csv"), "fecha_borrado,asset_id,nombre,fecha_captura,archivos\n\"x\",\"OLD\",\"n\",\"f\",\"a\"\n").unwrap();
+    std::fs::write(icopia::layout::en_disco(e.dir.path(), r".icopia\borrados.csv"), "fecha_borrado,asset_id,nombre,fecha_captura,archivos\n\"x\",\"OLD\",\"n\",\"f\",\"a\"\n").unwrap();
     let r = liberar::ejecutar(e.dir.path(), &e.reg, &mut e.fuente, &plan.listos, &|_, _| {}).unwrap();
     assert_eq!((r.borrados, r.bytes), (2, plan.bytes));
-    let csv = std::fs::read_to_string(e.dir.path().join(r".icopia\borrados.csv")).unwrap();
+    let csv = std::fs::read_to_string(icopia::layout::en_disco(e.dir.path(), r".icopia\borrados.csv")).unwrap();
     let lineas: Vec<&str> = csv.lines().collect();
     assert_eq!(lineas[0], "fecha_borrado,asset_id,nombre,fecha_captura,archivos,sesion");
     assert!(lineas[1].contains("OLD"), "las filas antiguas se conservan");
@@ -207,7 +221,7 @@ fn por_anios_y_restaurar_la_sesion() {
     assert!(rr.fallidos.is_empty());
     assert!(e.fuente.papelera.is_empty());
     assert!(e.reg.lock().unwrap().ids_de_sesion(&r.sesion).unwrap().is_empty());
-    assert!(std::fs::read_to_string(e.dir.path().join(r".icopia\restaurados.csv")).unwrap().contains("\"V1\""));
+    assert!(std::fs::read_to_string(icopia::layout::en_disco(e.dir.path(), r".icopia\restaurados.csv")).unwrap().contains("\"V1\""));
     assert_eq!(liberar::preparar_criterio(e.dir.path(), &e.reg, &c, motor::ahora(), &|_, _| {}).unwrap().listos.len(), 2);
     // Restaurar algo que no está en "Eliminado recientemente" falla sin tocar nada.
     let rr = liberar::restaurar(e.dir.path(), &e.reg, &mut e.fuente, &["V1".into()]).unwrap();
