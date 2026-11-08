@@ -54,11 +54,24 @@ pub fn preparar(destino: &Path, registro: &Mutex<Registro>, mantener_dias: u32, 
 
 /// Como `preparar`, con cualquier criterio (días a conservar o años de captura).
 pub fn preparar_criterio(destino: &Path, registro: &Mutex<Registro>, criterio: &Criterio, ahora: i64, avance: &dyn Fn(usize, usize)) -> Result<PlanLiberar> {
+    preparar_cancelable(destino, registro, criterio, ahora, avance, &AtomicBool::new(false))
+}
+
+/// Como `preparar_criterio`; con `cancelar` a `true` se detiene (sin plan y sin dejar avance).
+pub fn preparar_cancelable(
+    destino: &Path,
+    registro: &Mutex<Registro>,
+    criterio: &Criterio,
+    ahora: i64,
+    avance: &dyn Fn(usize, usize),
+    cancelar: &AtomicBool,
+) -> Result<PlanLiberar> {
     let mut seg = Seguimiento::continuar(registro, Some(criterio.dias()));
-    let r = preparar_con(destino, registro, criterio, ahora, avance, &mut seg);
+    let r = preparar_con(destino, registro, criterio, ahora, avance, &mut seg, cancelar);
     match &r {
         Ok(plan) if plan.listos.is_empty() => seg.descartar(),
         Ok(plan) => seg.fase(FaseLiberar::Confirmando, plan.listos.len() as u64, plan.bytes),
+        Err(_) if cancelar.load(Ordering::SeqCst) => seg.descartar(),
         Err(e) => seg.fallar(&format!("{e:#}")),
     }
     r
@@ -71,6 +84,7 @@ fn preparar_con(
     ahora: i64,
     avance: &dyn Fn(usize, usize),
     seg: &mut Seguimiento,
+    cancelar: &AtomicBool,
 ) -> Result<PlanLiberar> {
     let c = {
         let reg = registro.lock().unwrap();
@@ -84,6 +98,9 @@ fn preparar_con(
     let mut plan = PlanLiberar { listos: vec![], excluidos: vec![], no_verificados: c.no_verificados, no_liberables: c.no_liberables, bytes: 0, atipicos: 0 };
     let mut revisados = 0u64;
     for (i, c) in candidatos.into_iter().enumerate() {
+        if cancelar.load(Ordering::SeqCst) {
+            return Err(anyhow!("cancelado"));
+        }
         revisados += bytes_de(&c);
         match motivo_exclusion(destino, &c) {
             None => {

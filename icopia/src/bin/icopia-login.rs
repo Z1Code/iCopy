@@ -2,6 +2,7 @@
 //! Ventana pequeña para iniciar sesión en iCloud (lo mismo que `icopia login`, sin consola).
 //! Sale con código 0 si la sesión quedó iniciada; 1 si se cierra o cancela.
 use icopia::config::{self, Config};
+use icopia::i18n::{t, tf, T};
 use icopia::login::{comprobar_sesion, normalizar_codigo, EstadoSesion, FlujoLogin, Paso};
 use icopia::puente::Puente;
 use native_windows_gui as nwg;
@@ -58,7 +59,7 @@ fn trabajador(rx: Receiver<Orden>, tx: Sender<Respuesta>, aviso: nwg::NoticeSend
             }
             Orden::Codigo(c) => match flujo.as_mut() {
                 Some(f) => f.verificar(&c),
-                None => Paso::Fallo("Vuelve a empezar.".into()),
+                None => Paso::Fallo(t(T::LogEmpezar).into()),
             },
         };
         if paso == Paso::Hecho {
@@ -67,7 +68,7 @@ fn trabajador(rx: Receiver<Orden>, tx: Sender<Respuesta>, aviso: nwg::NoticeSend
                 cfg.guardar()
             });
             if let Err(e) = guardado {
-                paso = Paso::Fallo(format!("No pude guardar la configuración: {e:#}"));
+                paso = Paso::Fallo(tf(T::LogNoGuardada, &[("e", &format!("{e:#}"))]));
             }
         }
         if matches!(paso, Paso::Hecho | Paso::Fallo(_)) {
@@ -111,9 +112,6 @@ enum Tono {
     Exito,
 }
 
-const SUB_CREDENCIALES: &str = "Usa tu Apple ID. La contraseña solo se envía a Apple; icopia no la guarda.";
-const SUB_CODIGO: &str = "Escribe el código de 6 dígitos que apareció en tu iPhone.";
-const TITULO_VENTANA: &str = "Iniciar sesión · icopia";
 
 // Medidas en píxeles a 96 ppp (rejilla de 8 px); se escalan con el DPI del monitor.
 const ANCHO: i32 = 400;
@@ -219,13 +217,10 @@ impl Ui {
         let cambia_alto = e.compacta() != self.etapa.get().compacta();
         let (cred, cod) = (e == Etapa::Credenciales, e == Etapa::Codigo);
         let (titulo, subtitulo) = match e {
-            Etapa::Comprobando => ("Comprobando tu sesión…".to_string(), format!("Mirando si la sesión de {} sigue activa…", self.t_id.text().trim())),
-            Etapa::YaIniciada => (
-                "Ya tienes sesión iniciada".to_string(),
-                format!("Sesión activa como {}. icopia te avisará cuando caduque.", self.t_id.text().trim()),
-            ),
-            Etapa::Credenciales => ("Inicia sesión en iCloud".to_string(), SUB_CREDENCIALES.to_string()),
-            Etapa::Codigo => ("Inicia sesión en iCloud".to_string(), SUB_CODIGO.to_string()),
+            Etapa::Comprobando => (t(T::LogComprobando).to_string(), tf(T::LogComprobandoSub, &[("id", &self.t_id.text().trim())])),
+            Etapa::YaIniciada => (t(T::LogYa).to_string(), tf(T::LogYaSub, &[("id", &self.t_id.text().trim())])),
+            Etapa::Credenciales => (t(T::LogTitulo).to_string(), t(T::LogSubCred).to_string()),
+            Etapa::Codigo => (t(T::LogTitulo).to_string(), t(T::LogSubCodigo).to_string()),
         };
         self.titulo.set_text(&titulo);
         self.subtitulo.set_text(&subtitulo);
@@ -441,24 +436,24 @@ fn construir(ui: &mut Ui, apple_id: &str) -> Result<(), nwg::NwgError> {
     nwg::Window::builder()
         .flags(nwg::WindowFlags::WINDOW)
         .size((ANCHO, BARRA + ALTO_BARRA))
-        .title(TITULO_VENTANA)
+        .title(t(T::LogVentana))
         .build(&mut ui.ventana)?;
     let v = &ui.ventana;
     let padre = hwnd(&v.handle);
-    ui.titulo = Texto::nuevo(padre, "Inicia sesión en iCloud");
-    ui.subtitulo = Texto::nuevo(padre, SUB_CREDENCIALES);
-    ui.l_id = Texto::nuevo(padre, "Apple ID");
+    ui.titulo = Texto::nuevo(padre, t(T::LogTitulo));
+    ui.subtitulo = Texto::nuevo(padre, t(T::LogSubCred));
+    ui.l_id = Texto::nuevo(padre, t(T::LogAppleId));
     nwg::TextInput::builder().text(apple_id).parent(v).build(&mut ui.t_id)?;
-    ui.l_pw = Texto::nuevo(padre, "Contraseña");
+    ui.l_pw = Texto::nuevo(padre, t(T::LogContrasena));
     nwg::TextInput::builder().password(Some('●')).parent(v).build(&mut ui.t_pw)?;
-    ui.l_codigo = Texto::nuevo(padre, "Código de verificación");
+    ui.l_codigo = Texto::nuevo(padre, t(T::LogCodigo));
     nwg::TextInput::builder().limit(7).parent(v).build(&mut ui.t_codigo)?;
     ui.estado = Texto::nuevo(padre, "");
-    nwg::Button::builder().text("Cancelar").parent(v).build(&mut ui.b_cancelar)?;
-    nwg::Button::builder().text("Entrar").parent(v).build(&mut ui.b_entrar)?;
-    nwg::Button::builder().text("Verificar").parent(v).build(&mut ui.b_verificar)?;
-    nwg::Button::builder().text("Cambiar de cuenta").parent(v).build(&mut ui.b_cambiar)?;
-    nwg::Button::builder().text("Cerrar").parent(v).build(&mut ui.b_cerrar)?;
+    nwg::Button::builder().text(t(T::LogCancelar)).parent(v).build(&mut ui.b_cancelar)?;
+    nwg::Button::builder().text(t(T::LogEntrar)).parent(v).build(&mut ui.b_entrar)?;
+    nwg::Button::builder().text(t(T::LogVerificar)).parent(v).build(&mut ui.b_verificar)?;
+    nwg::Button::builder().text(t(T::LogCambiar)).parent(v).build(&mut ui.b_cambiar)?;
+    nwg::Button::builder().text(t(T::LogCerrar)).parent(v).build(&mut ui.b_cerrar)?;
     nwg::Notice::builder().parent(v).build(&mut ui.aviso)?;
     // Los botones de acción se dibujan como botón predeterminado (Intro).
     for b in [&ui.b_entrar, &ui.b_verificar, &ui.b_cerrar] {
@@ -478,7 +473,7 @@ fn instancia_unica() -> bool {
         if !h.is_null() && GetLastError() != ERROR_ALREADY_EXISTS {
             return true;
         }
-        let titulo: Vec<u16> = TITULO_VENTANA.encode_utf16().chain([0]).collect();
+        let titulo: Vec<u16> = t(T::LogVentana).encode_utf16().chain([0]).collect();
         let otra = wm::FindWindowW(std::ptr::null(), titulo.as_ptr());
         if !otra.is_null() {
             wm::ShowWindow(otra, wm::SW_RESTORE);
@@ -565,25 +560,25 @@ fn main() {
                     let apple_id = ui.t_id.text().trim().to_string();
                     let password = ui.t_pw.text();
                     if apple_id.is_empty() {
-                        ui.avisar(Tono::Error, "Escribe tu Apple ID.");
+                        ui.avisar(Tono::Error, t(T::LogFaltaId));
                         ui.t_id.set_focus();
                         return;
                     }
                     if password.is_empty() {
-                        ui.avisar(Tono::Error, "Escribe la contraseña.");
+                        ui.avisar(Tono::Error, t(T::LogFaltaPw));
                         ui.t_pw.set_focus();
                         return;
                     }
-                    ui.avisar(Tono::Info, "Conectando con Apple…");
+                    ui.avisar(Tono::Info, t(T::LogConectando));
                     Orden::Entrar { apple_id, password }
                 }
                 Etapa::Codigo => {
                     let Some(c) = normalizar_codigo(&ui.t_codigo.text()) else {
-                        ui.avisar(Tono::Error, "El código son 6 dígitos.");
+                        ui.avisar(Tono::Error, t(T::LogSeisDigitos));
                         ui.t_codigo.set_focus();
                         return;
                     };
-                    ui.avisar(Tono::Info, "Verificando el código…");
+                    ui.avisar(Tono::Info, t(T::LogVerificando));
                     Orden::Codigo(c)
                 }
             };
@@ -615,12 +610,12 @@ fn main() {
                             }
                             EstadoSesion::Caducada => {
                                 ui.mostrar_etapa(Etapa::Credenciales);
-                                ui.avisar(Tono::Info, "Tu sesión caducó. Vuelve a escribir la contraseña.");
+                                ui.avisar(Tono::Info, t(T::LogCaducada));
                                 ui.t_pw.set_focus();
                             }
                             EstadoSesion::Desconocida(m) => {
                                 ui.mostrar_etapa(Etapa::Credenciales);
-                                ui.avisar(Tono::Error, &format!("No pude comprobar la sesión: {m}"));
+                                ui.avisar(Tono::Error, &tf(T::LogNoComprobada, &[("m", &m)]));
                                 ui.t_pw.set_focus();
                             }
                         }
@@ -634,14 +629,14 @@ fn main() {
                     Paso::Hecho => {
                         exito.set(true);
                         ocupado.set(true); // ya no se aceptan más órdenes
-                        ui.avisar(Tono::Exito, "Sesión iniciada. Dura unos 2 meses; icopia te avisará cuando caduque.");
+                        ui.avisar(Tono::Exito, t(T::LogHecho));
                         continue;
                     }
                     Paso::PideCodigo => {
                         etapa = Etapa::Codigo;
                         ui.t_pw.set_text("");
                         ui.t_codigo.set_text("");
-                        ui.avisar(Tono::Info, "Apple ha enviado un código a tu iPhone.");
+                        ui.avisar(Tono::Info, t(T::LogCodigoEnviado));
                     }
                     Paso::Reintentar(m) => {
                         ui.avisar(Tono::Error, &m);

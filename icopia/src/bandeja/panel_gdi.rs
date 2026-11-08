@@ -2,6 +2,7 @@
 //! mano y texto con GDI (ClearType, Segoe UI). Lo usa la bandeja y `examples/panel_demo`.
 use crate::bandeja::icono::{self, APP};
 use crate::bandeja::panel::{Indicador, TonoLiberar, Vista};
+use crate::i18n::{t, T};
 use windows_sys::Win32::Foundation::RECT;
 use windows_sys::Win32::Graphics::Gdi as gdi;
 
@@ -28,24 +29,52 @@ pub fn alto(v: &Vista) -> i32 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Boton {
     Pausa,
+    /// "Liberar espacio…" (solo con la copia al día).
+    Liberar,
     Carpeta,
 }
 
-/// Rectángulo (x, y, ancho, alto) de un botón, en píxeles a 96 ppp.
-/// `alto`: alto del panel a 96 ppp (ver [`alto`]).
-pub fn rect_boton(b: Boton, alto: i32) -> (i32, i32, i32, i32) {
-    let w = (ANCHO - 2 * P - 8) / 2;
-    let y = alto - ALTO_PIE + (ALTO_PIE - 32) / 2;
-    match b {
-        Boton::Pausa => (P, y, w, 32),
-        Boton::Carpeta => (P + w + 8, y, w, 32),
+/// Disposición del pie: alto del panel (96 ppp) y si lleva el botón de liberar espacio.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pie {
+    pub alto: i32,
+    pub liberar: bool,
+}
+
+impl Default for Pie {
+    fn default() -> Self {
+        Pie { alto: ALTO, liberar: false }
     }
 }
 
+pub fn pie(v: &Vista) -> Pie {
+    Pie { alto: alto(v), liberar: v.boton_liberar }
+}
+
+impl Pie {
+    pub fn botones(self) -> Vec<Boton> {
+        if self.liberar {
+            vec![Boton::Pausa, Boton::Liberar, Boton::Carpeta]
+        } else {
+            vec![Boton::Pausa, Boton::Carpeta]
+        }
+    }
+}
+
+/// Rectángulo (x, y, ancho, alto) de un botón, en píxeles a 96 ppp.
+pub fn rect_boton(b: Boton, pie: Pie) -> (i32, i32, i32, i32) {
+    let botones = pie.botones();
+    let n = botones.len() as i32;
+    let w = (ANCHO - 2 * P - 8 * (n - 1)) / n;
+    let y = pie.alto - ALTO_PIE + (ALTO_PIE - 32) / 2;
+    let i = botones.iter().position(|&x| x == b).unwrap_or(0) as i32;
+    (P + i * (w + 8), y, w, 32)
+}
+
 /// Botón bajo un punto en píxeles a 96 ppp.
-pub fn boton_en(x: f64, y: f64, alto: i32) -> Option<Boton> {
-    [Boton::Pausa, Boton::Carpeta].into_iter().find(|&b| {
-        let (bx, by, bw, bh) = rect_boton(b, alto);
+pub fn boton_en(x: f64, y: f64, pie: Pie) -> Option<Boton> {
+    pie.botones().into_iter().find(|&b| {
+        let (bx, by, bw, bh) = rect_boton(b, pie);
         x >= bx as f64 && x < (bx + bw) as f64 && y >= by as f64 && y < (by + bh) as f64
     })
 }
@@ -59,34 +88,34 @@ pub fn tema_oscuro() -> bool {
         .unwrap_or(false)
 }
 
-type Rgb = [u8; 3];
+pub(crate) type Rgb = [u8; 3];
 
-struct Paleta {
-    fondo: Rgb,
-    pie: Rgb,
-    linea: Rgb,
-    tarjeta: Rgb,
-    borde_tarjeta: Rgb,
-    texto: Rgb,
-    secundario: Rgb,
-    pista: Rgb,
-    acento: Rgb,
-    texto_acento: Rgb,
+pub(crate) struct Paleta {
+    pub(crate) fondo: Rgb,
+    pub(crate) pie: Rgb,
+    pub(crate) linea: Rgb,
+    pub(crate) tarjeta: Rgb,
+    pub(crate) borde_tarjeta: Rgb,
+    pub(crate) texto: Rgb,
+    pub(crate) secundario: Rgb,
+    pub(crate) pista: Rgb,
+    pub(crate) acento: Rgb,
+    pub(crate) texto_acento: Rgb,
     /// Relleno del botón principal: azul profundo para que el texto blanco tenga contraste (≥ 4,5:1).
-    boton_acento: Rgb,
-    boton_acento_hover: Rgb,
-    boton: Rgb,
-    boton_hover: Rgb,
-    borde_boton: Rgb,
-    verde: Rgb,
-    gris: Rgb,
-    naranja: Rgb,
-    rojo: Rgb,
+    pub(crate) boton_acento: Rgb,
+    pub(crate) boton_acento_hover: Rgb,
+    pub(crate) boton: Rgb,
+    pub(crate) boton_hover: Rgb,
+    pub(crate) borde_boton: Rgb,
+    pub(crate) verde: Rgb,
+    pub(crate) gris: Rgb,
+    pub(crate) naranja: Rgb,
+    pub(crate) rojo: Rgb,
     /// Acento de "liberar espacio" (borrar en iCloud): ámbar.
-    ambar: Rgb,
+    pub(crate) ambar: Rgb,
 }
 
-const CLARA: Paleta = Paleta {
+pub(crate) const CLARA: Paleta = Paleta {
     fondo: [243, 243, 243],
     pie: [238, 238, 238],
     linea: [224, 224, 224],
@@ -109,7 +138,7 @@ const CLARA: Paleta = Paleta {
     ambar: [160, 88, 0],
 };
 
-const OSCURA: Paleta = Paleta {
+pub(crate) const OSCURA: Paleta = Paleta {
     fondo: [36, 36, 36],
     pie: [29, 29, 29],
     linea: [56, 56, 56],
@@ -183,7 +212,7 @@ impl Lienzo {
     }
 
     /// Rectángulo redondeado suavizado (coordenadas en píxeles físicos).
-    fn caja(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, c: Rgb, alfa: f32) {
+    pub(crate) fn caja(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, c: Rgb, alfa: f32) {
         let (ancho, alto) = (self.ancho, self.alto);
         let px = self.pixeles_mut();
         let r = r.min(w / 2.0).min(h / 2.0);
@@ -216,7 +245,7 @@ impl Lienzo {
     }
 
     /// Imagen RGBA sin premultiplicar.
-    fn imagen(&mut self, rgba: &[u8], n: i32, x: i32, y: i32) {
+    pub(crate) fn imagen(&mut self, rgba: &[u8], n: i32, x: i32, y: i32) {
         let ancho = self.ancho;
         let px = self.pixeles_mut();
         for j in 0..n {
@@ -242,11 +271,16 @@ impl Drop for Lienzo {
     }
 }
 
-struct Fuente(gdi::HFONT);
+pub(crate) struct Fuente(gdi::HFONT);
 
 impl Fuente {
-    fn nueva(em: f32, semibold: bool) -> Fuente {
-        let nombre: Vec<u16> = "Segoe UI\0".encode_utf16().collect();
+    pub(crate) fn nueva(em: f32, semibold: bool) -> Fuente {
+        Self::familia(em, semibold, "Segoe UI")
+    }
+
+    /// Otra familia (p. ej. "Segoe MDL2 Assets" para los iconos).
+    pub(crate) fn familia(em: f32, semibold: bool, familia: &str) -> Fuente {
+        let nombre: Vec<u16> = familia.encode_utf16().chain([0]).collect();
         let peso = if semibold { 600 } else { 400 };
         Fuente(unsafe {
             gdi::CreateFontW(-(em.round() as i32), 0, 0, 0, peso, 0, 0, 0, 1, 0, 0, gdi::CLEARTYPE_QUALITY as u32, 0, nombre.as_ptr())
@@ -261,13 +295,16 @@ impl Drop for Fuente {
 }
 
 #[derive(Clone, Copy)]
-enum Alinear {
+pub(crate) enum Alinear {
     Izq,
     Der,
     Centro,
 }
 
-fn texto(dc: gdi::HDC, f: &Fuente, s: &str, c: Rgb, r: (f32, f32, f32, f32), al: Alinear) {
+pub(crate) fn texto(dc: gdi::HDC, f: &Fuente, s: &str, c: Rgb, r: (f32, f32, f32, f32), al: Alinear) {
+    if s.is_empty() {
+        return; // DrawTextW con un puntero de cadena vacía (colgante) falla
+    }
     let w: Vec<u16> = s.encode_utf16().collect();
     let mut rc = RECT { left: r.0.round() as i32, top: r.1.round() as i32, right: (r.0 + r.2).round() as i32, bottom: (r.1 + r.3).round() as i32 };
     let al = match al {
@@ -284,7 +321,7 @@ fn texto(dc: gdi::HDC, f: &Fuente, s: &str, c: Rgb, r: (f32, f32, f32, f32), al:
     }
 }
 
-fn ancho_texto(dc: gdi::HDC, f: &Fuente, s: &str) -> f32 {
+pub(crate) fn ancho_texto(dc: gdi::HDC, f: &Fuente, s: &str) -> f32 {
     let w: Vec<u16> = s.encode_utf16().collect();
     let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
     unsafe {
@@ -295,18 +332,33 @@ fn ancho_texto(dc: gdi::HDC, f: &Fuente, s: &str) -> f32 {
     rc.right as f32
 }
 
+/// Texto en varias líneas (parte por palabras), alineado arriba a la izquierda.
+pub(crate) fn texto_envuelto(dc: gdi::HDC, f: &Fuente, s: &str, c: Rgb, r: (f32, f32, f32, f32)) {
+    if s.is_empty() {
+        return;
+    }
+    let w: Vec<u16> = s.encode_utf16().collect();
+    let mut rc = RECT { left: r.0.round() as i32, top: r.1.round() as i32, right: (r.0 + r.2).round() as i32, bottom: (r.1 + r.3).round() as i32 };
+    unsafe {
+        let viejo = gdi::SelectObject(dc, f.0);
+        gdi::SetTextColor(dc, colorref(c));
+        gdi::SetBkMode(dc, gdi::TRANSPARENT as i32);
+        gdi::DrawTextW(dc, w.as_ptr(), w.len() as i32, &mut rc, gdi::DT_LEFT | gdi::DT_WORDBREAK | gdi::DT_END_ELLIPSIS | gdi::DT_NOPREFIX);
+        gdi::SelectObject(dc, viejo);
+    }
+}
+
 /// Pinta el panel completo. `pulso` (0–1) anima el punto del indicador "En vivo".
 pub fn pintar(l: &mut Lienzo, v: &Vista, oscuro: bool, escala: f32, hover: Option<Boton>, pulso: f32) {
     let p = if oscuro { &OSCURA } else { &CLARA };
     let e = |x: i32| x as f32 * escala;
     let (w, h) = (l.ancho as f32, l.alto as f32);
-    let alto_panel = alto(v);
-    let pie = alto_panel - ALTO_PIE;
+    let y_pie = alto(v) - ALTO_PIE;
 
     // Fondo, pie y su línea.
     l.caja(0.0, 0.0, w, h, 0.0, p.fondo, 1.0);
-    l.caja(0.0, e(pie), w, h - e(pie), 0.0, p.pie, 1.0);
-    l.caja(0.0, e(pie), w, escala.round().max(1.0), 0.0, p.linea, 1.0);
+    l.caja(0.0, e(y_pie), w, h - e(y_pie), 0.0, p.pie, 1.0);
+    l.caja(0.0, e(y_pie), w, escala.round().max(1.0), 0.0, p.linea, 1.0);
 
     // Cabecera: icono, nombre e indicador.
     let lado = e(20).round() as i32;
@@ -386,11 +438,12 @@ pub fn pintar(l: &mut Lienzo, v: &Vista, oscuro: bool, escala: f32, hover: Optio
     }
 
     // Botones.
-    for b in [Boton::Pausa, Boton::Carpeta] {
-        let (bx, by, bw, bh) = rect_boton(b, alto_panel);
+    let disp = pie(v);
+    for b in disp.botones() {
+        let (bx, by, bw, bh) = rect_boton(b, disp);
         let (fondo, borde) = match b {
             Boton::Pausa => (if hover == Some(b) { p.boton_acento_hover } else { p.boton_acento }, p.boton_acento),
-            Boton::Carpeta => (if hover == Some(b) { p.boton_hover } else { p.boton }, p.borde_boton),
+            Boton::Liberar | Boton::Carpeta => (if hover == Some(b) { p.boton_hover } else { p.boton }, p.borde_boton),
         };
 
         l.caja(e(bx), e(by), e(bw), e(bh), e(4), borde, 1.0);
@@ -404,7 +457,7 @@ pub fn pintar(l: &mut Lienzo, v: &Vista, oscuro: bool, escala: f32, hover: Optio
     texto(dc, &f_titulo, &v.titulo, p.texto, (e(P), e(50), ancho_util, e(32)), Alinear::Izq);
     texto(dc, &f_peq, &v.linea, p.texto, (e(P), e(104), ancho_util, e(18)), Alinear::Izq);
     texto(dc, &f_peq, &v.linea_total, p.secundario, (e(P), e(124), ancho_util, e(18)), Alinear::Izq);
-    let filas = [("Ahora", &v.ahora), (v.etiqueta_velocidad, &v.velocidad), ("Último listado de iCloud", &v.listado), ("Errores", &v.errores)];
+    let filas = [(t(T::FilaAhora), &v.ahora), (v.etiqueta_velocidad, &v.velocidad), (t(T::FilaListado), &v.listado), (t(T::FilaErrores), &v.errores)];
     for (i, (nombre, valor)) in filas.iter().enumerate() {
         let y = tarjeta_y + e(2) + fila * i as f32;
         let x = e(P + 12);
@@ -420,11 +473,12 @@ pub fn pintar(l: &mut Lienzo, v: &Vista, oscuro: bool, escala: f32, hover: Optio
         texto(dc, &f_peq, &lv.linea, p.texto, (x, liberar_y + e(66), ancho, e(18)), Alinear::Izq);
         texto(dc, &f_peq, &lv.linea2, p.secundario, (x, liberar_y + e(84), ancho, e(18)), Alinear::Izq);
     }
-    for b in [Boton::Pausa, Boton::Carpeta] {
-        let (bx, by, bw, bh) = rect_boton(b, alto_panel);
+    for b in disp.botones() {
+        let (bx, by, bw, bh) = rect_boton(b, disp);
         let (rotulo, color) = match b {
             Boton::Pausa => (v.principal.texto(), p.texto_acento),
-            Boton::Carpeta => ("Abrir carpeta", p.texto),
+            Boton::Liberar => (t(T::BotLiberar), p.texto),
+            Boton::Carpeta => (t(T::BotCarpeta), p.texto),
         };
         let fuente = if b == Boton::Pausa { &f_boton } else { &f_norm };
         texto(dc, fuente, rotulo, color, (e(bx), e(by), e(bw), e(bh)), Alinear::Centro);
@@ -470,14 +524,34 @@ mod tests {
         use crate::bandeja::panel::{vista, Medidas, TonoLiberar, VistaLiberar};
         let mut v = vista(&EstadoUi::sin_datos(Fase::Inactiva), Medidas::default(), 0);
         assert_eq!(alto(&v), ALTO);
-        let (_, y, _, _) = rect_boton(Boton::Pausa, alto(&v));
-        assert_eq!(boton_en(20.0, y as f64 + 1.0, alto(&v)), Some(Boton::Pausa));
+        let (_, y, _, _) = rect_boton(Boton::Pausa, pie(&v));
+        assert_eq!(boton_en(20.0, y as f64 + 1.0, pie(&v)), Some(Boton::Pausa));
         v.liberar = Some(VistaLiberar { titulo: String::new(), subtitulo: String::new(), fraccion: None, linea: String::new(), linea2: String::new(), tono: TonoLiberar::Activo });
         let a = alto(&v);
         assert_eq!(a, ALTO + EXTRA_LIBERAR);
-        let (_, y2, _, h2) = rect_boton(Boton::Carpeta, a);
+        let (_, y2, _, h2) = rect_boton(Boton::Carpeta, pie(&v));
         assert_eq!(y2, y + EXTRA_LIBERAR);
         assert!(y2 + h2 <= a && y2 >= LIBERAR_Y + LIBERAR_ALTO, "los botones quedan en el pie, bajo la tarjeta");
-        assert_eq!(boton_en(20.0, y as f64 + 1.0, a), None);
+        assert_eq!(boton_en(20.0, y as f64 + 1.0, pie(&v)), None);
+    }
+
+    #[test]
+    fn con_la_copia_al_dia_hay_boton_de_liberar_espacio() {
+        use crate::bandeja::estado::{EstadoUi, Fase};
+        use crate::bandeja::panel::{vista, Medidas};
+        use crate::registro::Progreso;
+        let al_dia = Progreso { partes: 2, verificadas: 2, bytes_total: 2, bytes_verificados: 2, ..Progreso::default() };
+        let v = vista(&EstadoUi::con_progreso(Fase::Inactiva, &al_dia), Medidas::default(), 0);
+        let d = pie(&v);
+        assert_eq!(d.botones(), vec![Boton::Pausa, Boton::Liberar, Boton::Carpeta]);
+        let (x0, _, w0, _) = rect_boton(Boton::Pausa, d);
+        let (x2, y2, w2, _) = rect_boton(Boton::Carpeta, d);
+        assert_eq!((x0, x2 + w2), (P, ANCHO - P), "ocupan todo el ancho");
+        assert_eq!(w0, w2);
+        let (x1, _, _, _) = rect_boton(Boton::Liberar, d);
+        assert_eq!(boton_en(x1 as f64 + 2.0, y2 as f64 + 2.0, d), Some(Boton::Liberar));
+        let pendiente = Progreso { partes: 2, verificadas: 1, ..al_dia };
+        let v = vista(&EstadoUi::con_progreso(Fase::Inactiva, &pendiente), Medidas::default(), 0);
+        assert!(!pie(&v).liberar, "solo con todo copiado");
     }
 }

@@ -3,6 +3,7 @@ pub mod bitacora;
 pub mod cerrojo;
 pub mod config;
 pub mod criterio;
+pub mod i18n;
 pub mod descarga;
 pub mod disco;
 pub mod energia;

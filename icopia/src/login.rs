@@ -1,4 +1,5 @@
 //! Flujo de inicio de sesión (contraseña + código 2FA), común a `icopia login` y a `icopia-login`.
+use crate::i18n::{t, tf, T};
 use crate::fuente::ErrorFuente;
 use crate::puente::Puente;
 
@@ -74,33 +75,33 @@ impl<P: PuenteLogin> FlujoLogin<P> {
         match self.puente.login(password) {
             Ok(true) => Paso::PideCodigo,
             Ok(false) => self.comprobar(),
-            Err(ErrorFuente::Credenciales(_)) => Paso::Reintentar("Apple ID o contraseña incorrectos".into()),
-            Err(e) => Paso::Reintentar(format!("No pude conectar con Apple: {e}")),
+            Err(ErrorFuente::Credenciales(_)) => Paso::Reintentar(t(T::LogIncorrectos).into()),
+            Err(e) => Paso::Reintentar(tf(T::LogSinConexion, &[("e", &e)])),
         }
     }
 
     pub fn verificar(&mut self, codigo: &str) -> Paso {
         let Some(codigo) = normalizar_codigo(codigo) else {
-            return Paso::Reintentar("El código son 6 dígitos".into());
+            return Paso::Reintentar(t(T::LogSeisDigitos).trim_end_matches('.').into());
         };
         match self.puente.codigo_2fa(&codigo) {
             Ok(()) => self.comprobar(),
             Err(ErrorFuente::Credenciales(_)) => {
                 self.fallos += 1;
                 if self.fallos >= MAX_FALLOS_CODIGO {
-                    Paso::Fallo("Demasiados códigos incorrectos. Vuelve a empezar.".into())
+                    Paso::Fallo(t(T::LogDemasiados).into())
                 } else {
-                    Paso::Reintentar("Código incorrecto, prueba otra vez.".into())
+                    Paso::Reintentar(t(T::LogCodigoMal).into())
                 }
             }
-            Err(e) => Paso::Fallo(format!("No pude verificar el código: {e}")),
+            Err(e) => Paso::Fallo(tf(T::LogNoVerificado, &[("e", &e)])),
         }
     }
 
     fn comprobar(&mut self) -> Paso {
         match self.puente.sesion() {
             Ok(()) => Paso::Hecho,
-            Err(e) => Paso::Fallo(format!("La sesión no quedó válida: {e}")),
+            Err(e) => Paso::Fallo(tf(T::LogNoValida, &[("e", &e)])),
         }
     }
 }

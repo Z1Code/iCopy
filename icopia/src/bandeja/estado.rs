@@ -56,6 +56,8 @@ pub struct Ronda {
 pub enum EventoUi {
     Estado(EstadoUi),
     Aviso { titulo: String, texto: String },
+    /// Para el asistente de liberar espacio.
+    Liberar(crate::bandeja::asistente::EventoLiberar),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,18 +68,8 @@ pub enum Color {
     Rojo,
 }
 
-/// 12430 → "12.430"
-pub fn miles(n: u64) -> String {
-    let s = n.to_string();
-    let mut out = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i) % 3 == 0 {
-            out.push('.');
-        }
-        out.push(c);
-    }
-    out
-}
+pub use crate::i18n::miles;
+use crate::i18n::{t, tf, T};
 
 impl EstadoUi {
     pub fn sin_datos(fase: Fase) -> EstadoUi {
@@ -133,32 +125,32 @@ impl EstadoUi {
 
     fn progreso(&self) -> String {
         if self.total == 0 {
-            "nada copiado aún".into()
+            t(T::EstNada).into()
         } else {
-            format!("{} de {} archivos ({}%)", miles(self.verificadas), miles(self.total), self.verificadas * 100 / self.total)
+            tf(T::EstArchivos, &[("v", &miles(self.verificadas)), ("t", &miles(self.total)), ("p", &(self.verificadas * 100 / self.total))])
         }
     }
 
     /// Texto corto (cabe en el tooltip de Windows, 127 caracteres).
     pub fn texto(&self) -> String {
-        let t = match &self.fase {
-            Fase::Inactiva if self.total > 0 && self.verificadas == self.total => format!("Al día — {}", self.progreso()),
-            Fase::Inactiva => format!("En espera — {}", self.progreso()),
-            Fase::Listando { vistos } if self.detalle.renovando_enlaces => format!("Renovando enlaces de iCloud… ({} vistos)", miles(*vistos as u64)),
-            Fase::Listando { vistos } => format!("Revisando iCloud… ({} vistos)", miles(*vistos as u64)),
+        let texto = match &self.fase {
+            Fase::Inactiva if self.total > 0 && self.verificadas == self.total => tf(T::EstAlDia, &[("p", &self.progreso())]),
+            Fase::Inactiva => tf(T::EstEspera, &[("p", &self.progreso())]),
+            Fase::Listando { vistos } if self.detalle.renovando_enlaces => tf(T::TitRenovandoN, &[("n", &miles(*vistos as u64))]),
+            Fase::Listando { vistos } => tf(T::TitRevisandoN, &[("n", &miles(*vistos as u64))]),
             Fase::Copiando { hechas, total } => {
-                let pct = self.porcentaje().map(|p| format!(" · {p} % del total")).unwrap_or_default();
-                format!("Copiando {} de {}…{pct}", miles(*hechas as u64), miles(*total as u64))
+                let pct = self.porcentaje().map(|p| tf(T::EstDelTotal, &[("p", &p)])).unwrap_or_default();
+                tf(T::EstCopiando, &[("h", &miles(*hechas as u64)), ("t", &miles(*total as u64)), ("pct", &pct)])
             }
-            Fase::Verificando { hechas, total } => format!("Verificando {} de {}…", miles(*hechas as u64), miles(*total as u64)),
-            Fase::Pausada => format!("En pausa — {}", self.progreso()),
-            Fase::SesionCaducada => "Inicia sesión en iCloud (menú → Iniciar sesión)".into(),
-            Fase::SinEspacio => "Sin espacio en el disco destino".into(),
-            Fase::DestinoAusente => "No encuentro la carpeta destino (¿disco desconectado?)".into(),
-            Fase::SinDestino => "Elige una carpeta destino (menú → Cambiar destino)".into(),
-            Fase::Error(m) => format!("Error: {m}"),
+            Fase::Verificando { hechas, total } => tf(T::EstVerificando, &[("h", &miles(*hechas as u64)), ("t", &miles(*total as u64))]),
+            Fase::Pausada => tf(T::EstPausa, &[("p", &self.progreso())]),
+            Fase::SesionCaducada => t(T::EstSesion).into(),
+            Fase::SinEspacio => t(T::EstSinEspacio).into(),
+            Fase::DestinoAusente => t(T::EstSinDestino).into(),
+            Fase::SinDestino => t(T::EstElige).into(),
+            Fase::Error(m) => tf(T::EstError, &[("m", m)]),
         };
-        t.chars().take(110).collect()
+        texto.chars().take(110).collect()
     }
 
     pub fn color(&self) -> Color {

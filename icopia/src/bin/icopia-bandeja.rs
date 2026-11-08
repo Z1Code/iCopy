@@ -1,6 +1,10 @@
 #![windows_subsystem = "windows"]
 use anyhow::Context;
+use icopia::bandeja::asistente::{Accion as AccionAsistente, Asistente, Paso, Revision};
+use icopia::bandeja::asistente_ventana::VentanaAsistente;
 use icopia::bandeja::estado::{EstadoUi, EventoUi, Fase};
+use icopia::i18n::{t, T};
+use icopia::liberar::ControlBorrado;
 use icopia::bandeja::panel::Principal;
 use icopia::bandeja::hover::Rect;
 use icopia::bandeja::panel_ventana::{Accion, Panel};
@@ -57,6 +61,7 @@ fn sondear_registro(abierto: Arc<AtomicBool>, proxy: tao::event_loop::EventLoopP
         loop {
             std::thread::sleep(Duration::from_secs(1));
             vuelta += 1;
+            // Panel o asistente abiertos: lectura completa cada segundo.
             let panel = abierto.load(Ordering::Relaxed);
             if !panel && vuelta % 5 != 0 {
                 continue;
@@ -124,14 +129,6 @@ fn exe_junto(nombre: &str) -> std::path::PathBuf {
     std::env::current_exe().expect("ruta del exe").with_file_name(nombre)
 }
 
-/// Abre `icopia.exe <sub> --pausa` en una consola nueva, pausando la copia mientras tanto.
-fn lanzar_consola(sub: &str, tx: &mpsc::Sender<Orden>, cancelar: &AtomicBool, ya_pausado: bool) {
-    use std::os::windows::process::CommandExt;
-    let mut cmd = std::process::Command::new(exe_junto("icopia.exe"));
-    cmd.arg(sub).arg("--pausa").creation_flags(0x0000_0010); // CREATE_NEW_CONSOLE
-    lanzar_pausando(cmd, tx, cancelar, ya_pausado);
-}
-
 /// Abre la ventana de inicio de sesión (`icopia-login.exe`), pausando la copia mientras tanto.
 fn lanzar_login(tx: &mpsc::Sender<Orden>, cancelar: &AtomicBool, ya_pausado: bool) {
     lanzar_pausando(std::process::Command::new(exe_junto("icopia-login.exe")), tx, cancelar, ya_pausado);
@@ -143,7 +140,7 @@ fn main() {
     }
     let mut cfg = Config::cargar().unwrap_or_default();
     if cfg.destino.is_none() {
-        if let Some(p) = rfd::FileDialog::new().set_title("icopia: elige dónde guardar las fotos").pick_folder() {
+        if let Some(p) = rfd::FileDialog::new().set_title(t(T::DlgDestino)).pick_folder() {
             cfg.destino = Some(p);
             let _ = cfg.guardar();
         }
@@ -159,9 +156,12 @@ fn main() {
     }));
     let (tx, rx) = mpsc::channel::<Orden>();
     let cancelar = Arc::new(AtomicBool::new(false));
-    hilo_motor::lanzar(
+    // Pausar o cancelar un borrado en marcha (el motor está ocupado: no pasa por la cola).
+    let control = Arc::new(ControlBorrado::default());
+    hilo_motor::lanzar_con(
         rx,
         cancelar.clone(),
+        control.clone(),
         Box::new(|| Config::cargar().unwrap_or_default()),
         Box::new(|cfg: &Config| {
             let id = cfg.apple_id.as_deref().context("sin Apple ID")?;
@@ -178,16 +178,16 @@ fn main() {
         lanzar_login(&tx, &cancelar, false);
     }
 
-    let i_estado = MenuItem::new("icopia — iniciando…", false, None);
-    let i_copiar = MenuItem::new("Copiar ahora", true, None);
-    let i_pausa = MenuItem::new("Pausar", true, None);
-    let i_verificar = MenuItem::new("Verificar todo", true, None);
-    let i_liberar = MenuItem::new("Liberar espacio en iCloud…", true, None);
-    let i_abrir = MenuItem::new("Abrir carpeta de fotos", true, None);
-    let i_destino = MenuItem::new("Cambiar destino…", true, None);
-    let i_login = MenuItem::new("Iniciar sesión en iCloud…", true, None);
-    let i_auto = CheckMenuItem::new("Iniciar con Windows", true, autoarranque::activo(), None);
-    let i_salir = MenuItem::new("Salir", true, None);
+    let i_estado = MenuItem::new(t(T::MenuIniciando), false, None);
+    let i_copiar = MenuItem::new(t(T::MenuCopiar), true, None);
+    let i_pausa = MenuItem::new(t(T::MenuPausar), true, None);
+    let i_verificar = MenuItem::new(t(T::MenuVerificar), true, None);
+    let i_liberar = MenuItem::new(t(T::MenuLiberar), true, None);
+    let i_abrir = MenuItem::new(t(T::MenuAbrir), true, None);
+    let i_destino = MenuItem::new(t(T::MenuDestino), true, None);
+    let i_login = MenuItem::new(t(T::MenuSesion), true, None);
+    let i_auto = CheckMenuItem::new(t(T::MenuAuto), true, autoarranque::activo(), None);
+    let i_salir = MenuItem::new(t(T::MenuSalir), true, None);
     let menu = Menu::new();
     menu.append_items(&[
         &i_estado,
@@ -215,26 +215,98 @@ fn main() {
     let mut ultimo_refresco = Instant::now();
     let mut tooltip = String::from("icopia");
     let mut liberar: Option<ProgresoLiberar> = None;
+    let mut asistente: Option<VentanaAsistente> = None;
+    let mut ultimo_asistente = Instant::now();
+    // Abre (o trae al frente) el asistente de liberar espacio con el inventario actual del registro.
+    let abrir_asistente = |asistente: &mut Option<VentanaAsistente>, destino_ev: &tao::event_loop::EventLoopWindowTarget<Ev>, liberar: &Option<ProgresoLiberar>| {
+        let inventario = || {
+            Config::cargar()
+                .ok()
+                .and_then(|c| c.destino)
+                .map(|d| d.join(".icopia").join("registro.db"))
+                .filter(|r| r.exists())
+                .and_then(|r| icopia::registro::Registro::abrir_lectura(&r).ok())
+                .and_then(|r| r.inventario_liberar().ok())
+                .unwrap_or_default()
+        };
+        let ahora = chrono::Utc::now().timestamp();
+        match asistente {
+            Some(a) => {
+                // Un borrado en marcha (o una revisión) se sigue viendo; si no, se empieza de nuevo.
+                let en_curso = a.modelo.ocupado() || a.modelo.paso == Paso::Revisar && a.modelo.revision == Revision::EnCurso;
+                if !a.visible() && !en_curso {
+                    a.modelo.reiniciar(inventario(), ahora);
+                }
+            }
+            None => *asistente = Some(VentanaAsistente::nueva(destino_ev, Asistente::nuevo(inventario(), ahora))),
+        }
+        let a = asistente.as_mut().expect("asistente");
+        a.modelo.progreso = liberar.clone();
+        a.mostrar();
+    };
+    let (tx_as, cancelar_as, control_as) = (tx.clone(), cancelar.clone(), control.clone());
+    let abrir_carpeta_as = abrir_carpeta_fn;
+    // Lo que pide el asistente.
+    let atender = move |acc: AccionAsistente, a: &mut VentanaAsistente| match acc {
+        AccionAsistente::Revisar(c) => {
+            // Primero se corta la ronda en curso (si la hay); el motor lo vuelve a poner a cero.
+            cancelar_as.store(true, Ordering::SeqCst);
+            let _ = tx_as.send(Orden::LiberarRevisar(c));
+        }
+        AccionAsistente::CancelarRevision => cancelar_as.store(true, Ordering::SeqCst),
+        AccionAsistente::Descartar => {
+            let _ = tx_as.send(Orden::LiberarDescartar);
+        }
+        AccionAsistente::Ejecutar => {
+            control_as.pausa.store(false, Ordering::SeqCst);
+            control_as.cancelar.store(false, Ordering::SeqCst);
+            let _ = tx_as.send(Orden::LiberarEjecutar);
+        }
+        AccionAsistente::Pausar(si) => control_as.pausa.store(si, Ordering::SeqCst),
+        AccionAsistente::CancelarBorrado => control_as.cancelar.store(true, Ordering::SeqCst),
+        AccionAsistente::AbrirArchivo(ruta) => {
+            let _ = std::process::Command::new("explorer").arg(ruta).spawn();
+        }
+        AccionAsistente::AbrirCarpeta => abrir_carpeta_as(),
+        AccionAsistente::Restaurar(sesion) => {
+            let _ = tx_as.send(Orden::LiberarRestaurar(sesion));
+        }
+        AccionAsistente::Cerrar => {
+            // Sin borrar nada todavía: se cancela la revisión o se olvida el plan.
+            match (&a.modelo.paso, &a.modelo.revision) {
+                (Paso::Revisar, Revision::EnCurso) => cancelar_as.store(true, Ordering::SeqCst),
+                (Paso::Revisar | Paso::Confirmar, Revision::Lista(_)) => {
+                    let _ = tx_as.send(Orden::LiberarDescartar);
+                }
+                _ => {}
+            }
+            if !a.modelo.ocupado() {
+                a.modelo.paso = Paso::Elegir;
+            }
+            a.ocultar();
+        }
+    };
     let mut tooltip_puesto: Option<String> = Some(tooltip.clone());
 
     let (tx_pausa, cancelar_pausa) = (tx.clone(), cancelar.clone());
     let alternar_pausa = move |pausado: &mut bool, i_pausa: &MenuItem| {
         if *pausado {
             *pausado = false;
-            i_pausa.set_text("Pausar");
+            i_pausa.set_text(t(T::MenuPausar));
             let _ = tx_pausa.send(Orden::Reanudar);
         } else {
             *pausado = true;
-            i_pausa.set_text("Reanudar");
+            i_pausa.set_text(t(T::MenuReanudar));
             let _ = tx_pausa.send(Orden::Pausar);
             cancelar_pausa.store(true, Ordering::SeqCst);
         }
     };
-    let abrir_carpeta = || {
+    fn abrir_carpeta_fn() {
         if let Some(d) = Config::cargar().ok().and_then(|c| c.destino) {
             let _ = std::process::Command::new("explorer").arg(d).spawn();
         }
-    };
+    }
+    let abrir_carpeta = abrir_carpeta_fn;
 
     event_loop.run(move |event, destino_ev, control_flow| {
         let mut espera = Duration::from_millis(200);
@@ -292,11 +364,20 @@ fn main() {
                 }
                 liberar = l;
                 tooltip = texto_tooltip(&estado, liberar.as_ref());
+                if let Some(a) = asistente.as_mut() {
+                    a.modelo.progreso = liberar.clone();
+                }
                 if let Some(p) = panel.as_mut() {
                     p.poner_liberar(liberar.clone());
                 }
             }
             Event::UserEvent(Ev::Ui(EventoUi::Aviso { titulo, texto })) => avisos::mostrar(&titulo, &texto),
+            Event::UserEvent(Ev::Ui(EventoUi::Liberar(e))) => {
+                if let Some(a) = asistente.as_mut() {
+                    a.modelo.evento(e);
+                    a.refrescar();
+                }
+            }
             Event::UserEvent(Ev::Bandeja(TrayIconEvent::Enter { rect, .. } | TrayIconEvent::Move { rect, .. })) => {
                 if let Some(p) = panel.as_mut() {
                     p.aviso_icono(centro_de(&rect));
@@ -334,7 +415,7 @@ fn main() {
                     }
                     Some(Accion::Principal(Principal::RevisarAhora)) => {
                         pausado = false;
-                        i_pausa.set_text("Pausar");
+                        i_pausa.set_text(t(T::MenuPausar));
                         let _ = tx.send(Orden::CopiarAhora);
                     }
                     Some(Accion::Principal(Principal::IniciarSesion)) => {
@@ -345,10 +426,25 @@ fn main() {
                         p.ocultar();
                         abrir_carpeta();
                     }
+                    Some(Accion::Liberar) => {
+                        p.ocultar();
+                        abrir_asistente(&mut asistente, destino_ev, &liberar);
+                    }
                     None => {}
                 }
                 if matches!(event, WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. }) {
                     p.refrescar(&estado);
+                }
+            }
+            Event::WindowEvent { window_id, event, .. } if asistente.as_ref().is_some_and(|a| a.id() == window_id) => {
+                let a = asistente.as_mut().expect("asistente");
+                if let Some(acc) = a.evento(&event) {
+                    atender(acc, a);
+                }
+            }
+            Event::RedrawRequested(id) if asistente.as_ref().is_some_and(|a| a.id() == id) => {
+                if let Some(a) = asistente.as_mut() {
+                    a.refrescar();
                 }
             }
             Event::RedrawRequested(id) if panel.as_ref().is_some_and(|p| p.id() == id) => {
@@ -376,7 +472,7 @@ fn main() {
                 }
                 tooltip_puesto = quiero;
             }
-            panel_abierto.store(p.visible(), Ordering::Relaxed);
+            panel_abierto.store(p.visible() || asistente.as_ref().is_some_and(|a| a.visible()), Ordering::Relaxed);
             p.muestrear();
             if p.visible() {
                 let cada = p.intervalo(&estado);
@@ -387,25 +483,39 @@ fn main() {
                 espera = espera.min(cada);
             }
         }
+        if let Some(a) = asistente.as_mut().filter(|a| a.visible()) {
+            if let Some(acc) = a.tick() {
+                atender(acc, a);
+            }
+            let cada = a.intervalo();
+            if ultimo_asistente.elapsed() >= cada {
+                ultimo_asistente = Instant::now();
+                a.refrescar();
+            }
+            espera = espera.min(cada);
+        }
         *control_flow = ControlFlow::WaitUntil(Instant::now() + espera);
         while let Ok(ev) = MenuEvent::receiver().try_recv() {
             let id = ev.id;
             if id == *i_copiar.id() {
                 pausado = false;
-                i_pausa.set_text("Pausar");
+                i_pausa.set_text(t(T::MenuPausar));
                 let _ = tx.send(Orden::CopiarAhora);
             } else if id == *i_pausa.id() {
                 alternar_pausa(&mut pausado, &i_pausa);
             } else if id == *i_verificar.id() {
                 let _ = tx.send(Orden::Verificar);
             } else if id == *i_liberar.id() {
-                lanzar_consola("liberar", &tx, &cancelar, pausado);
+                if let Some(p) = panel.as_mut() {
+                    p.ocultar();
+                }
+                abrir_asistente(&mut asistente, destino_ev, &liberar);
             } else if id == *i_login.id() {
                 lanzar_login(&tx, &cancelar, pausado);
             } else if id == *i_abrir.id() {
                 abrir_carpeta();
             } else if id == *i_destino.id() {
-                if let Some(p) = rfd::FileDialog::new().set_title("icopia: nueva carpeta destino").pick_folder() {
+                if let Some(p) = rfd::FileDialog::new().set_title(t(T::DlgNuevoDestino)).pick_folder() {
                     let mut c = Config::cargar().unwrap_or_default();
                     c.destino = Some(p);
                     let _ = c.guardar();

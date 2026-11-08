@@ -1,6 +1,10 @@
 //! Hilo que ejecuta rondas periódicas y obedece órdenes del menú.
 use crate::auditoria;
 use crate::bandeja::estado::{EstadoUi, EventoUi, Fase, Ronda};
+use crate::bandeja::hilo_liberar::{self, PlanPendiente};
+use crate::criterio::Criterio;
+use crate::i18n::{miles, t, tf, T};
+use crate::liberar::ControlBorrado;
 use crate::bitacora;
 use crate::cerrojo;
 use crate::config::Config;
@@ -25,6 +29,20 @@ pub enum Orden {
     Reanudar,
     Verificar,
     Salir,
+    /// Listar iCloud y re-verificar lo que se liberaría (el plan queda esperando confirmación).
+    LiberarRevisar(Criterio),
+    /// Borrar el plan revisado (pausa y cancelación con el `ControlBorrado` compartido).
+    LiberarEjecutar,
+    /// Olvidar el plan sin borrar nada.
+    LiberarDescartar,
+    /// Restaurar lo borrado en una liberación.
+    LiberarRestaurar(String),
+}
+
+impl Orden {
+    fn de_liberar(&self) -> bool {
+        matches!(self, Orden::LiberarRevisar(_) | Orden::LiberarEjecutar | Orden::LiberarDescartar | Orden::LiberarRestaurar(_))
+    }
 }
 
 pub type CargarConfig = Box<dyn Fn() -> Config + Send>;
@@ -32,7 +50,19 @@ pub type AbrirFuente = Box<dyn Fn(&Config) -> anyhow::Result<Box<dyn FuenteIclou
 pub type Emitir = Box<dyn Fn(EventoUi) + Send + Sync>;
 
 pub fn lanzar(rx: Receiver<Orden>, cancelar: Arc<AtomicBool>, cargar_config: CargarConfig, abrir_fuente: AbrirFuente, emitir: Emitir) -> JoinHandle<()> {
-    std::thread::spawn(move || bucle(rx, &cancelar, &*cargar_config, &*abrir_fuente, &*emitir))
+    lanzar_con(rx, cancelar, Arc::new(ControlBorrado::default()), cargar_config, abrir_fuente, emitir)
+}
+
+/// Como `lanzar`, con el control (pausa/cancelación) de los borrados que haga el motor.
+pub fn lanzar_con(
+    rx: Receiver<Orden>,
+    cancelar: Arc<AtomicBool>,
+    control: Arc<ControlBorrado>,
+    cargar_config: CargarConfig,
+    abrir_fuente: AbrirFuente,
+    emitir: Emitir,
+) -> JoinHandle<()> {
+    std::thread::spawn(move || bucle(rx, &cancelar, &control, &*cargar_config, &*abrir_fuente, &*emitir))
 }
 
 fn aviso(emitir: &(dyn Fn(EventoUi) + Sync), texto: impl Into<String>) {
@@ -57,6 +87,7 @@ fn emitir_resumen(cfg: &Config, fase: Fase, emitir: &(dyn Fn(EventoUi) + Sync)) 
 fn bucle(
     rx: Receiver<Orden>,
     cancelar: &AtomicBool,
+    control: &ControlBorrado,
     cargar_config: &dyn Fn() -> Config,
     abrir_fuente: &dyn Fn(&Config) -> anyhow::Result<Box<dyn FuenteIcloud>>,
     emitir: &(dyn Fn(EventoUi) + Sync),
@@ -67,22 +98,78 @@ fn bucle(
     let mut ultimo_fin: Option<FinRonda> = None;
     // La ronda anterior aplazó archivos por enlaces caducados: el próximo listado los renueva.
     let mut renovar = false;
+    // Plan de liberar esperando confirmación, y la espera de rondas que había antes de él.
+    let mut plan: Option<PlanPendiente> = None;
+    let mut espera_normal: Option<Option<Duration>> = None;
+    // Orden de liberar llegada mientras se vaciaba la cola antes de una ronda: se atiende primero.
+    let mut diferida: Option<Orden> = None;
     emitir_resumen(&cargar_config(), Fase::Inactiva, emitir);
     loop {
-        let orden = match espera {
-            Some(d) => match rx.recv_timeout(d) {
-                Ok(o) => Some(o),
-                Err(RecvTimeoutError::Timeout) => None,
-                Err(RecvTimeoutError::Disconnected) => return,
-            },
-            None => match rx.recv() {
-                Ok(o) => Some(o),
-                Err(_) => return,
-            },
+        let orden = if let Some(o) = diferida.take() {
+            Some(o)
+        } else {
+            match espera {
+                Some(d) => match rx.recv_timeout(d) {
+                    Ok(o) => Some(o),
+                    Err(RecvTimeoutError::Timeout) => None,
+                    Err(RecvTimeoutError::Disconnected) => return,
+                },
+                None => match rx.recv() {
+                    Ok(o) => Some(o),
+                    Err(_) => return,
+                },
+            }
         };
         let mut forzar = false;
         match orden {
-            Some(Orden::Salir) => return,
+            Some(Orden::Salir) => {
+                if let Some(p) = plan.take() {
+                    p.descartar();
+                }
+                return;
+            }
+            Some(Orden::LiberarRevisar(c)) => {
+                if let Some(p) = plan.take() {
+                    p.descartar();
+                }
+                emitir_resumen(&cargar_config(), Fase::Inactiva, emitir);
+                plan = hilo_liberar::revisar(&cargar_config(), cancelar, abrir_fuente, emitir, &c);
+                if plan.is_some() {
+                    espera_normal.get_or_insert(espera);
+                    espera = Some(hilo_liberar::LATIDO);
+                }
+                continue;
+            }
+            Some(Orden::LiberarEjecutar) => {
+                if let Some(p) = plan.take() {
+                    control.pausa.store(false, Ordering::SeqCst);
+                    control.cancelar.store(false, Ordering::SeqCst);
+                    hilo_liberar::ejecutar(p, control, emitir);
+                    emitir_resumen(&cargar_config(), Fase::Inactiva, emitir);
+                }
+                espera = espera_normal.take().unwrap_or(espera);
+                continue;
+            }
+            Some(Orden::LiberarDescartar) => {
+                if let Some(p) = plan.take() {
+                    p.descartar();
+                }
+                espera = espera_normal.take().unwrap_or(espera);
+                continue;
+            }
+            Some(Orden::LiberarRestaurar(sesion)) => {
+                hilo_liberar::restaurar(&cargar_config(), abrir_fuente, emitir, &sesion);
+                emitir_resumen(&cargar_config(), Fase::Inactiva, emitir);
+                continue;
+            }
+            // Esperando confirmación: no hay rondas; se renueva el avance (o caduca el plan).
+            None if plan.is_some() => {
+                if !plan.as_ref().is_some_and(|p| p.latir()) {
+                    plan = None;
+                    espera = espera_normal.take().unwrap_or(espera);
+                }
+                continue;
+            }
             Some(Orden::Pausar) => {
                 pausado = true;
                 espera = None;
@@ -117,13 +204,21 @@ fn bucle(
                         forzar = true;
                     }
                     Ok(Orden::Verificar) => verificar(&cargar_config(), cancelar, emitir),
+                    Ok(o) if o.de_liberar() => {
+                        diferida = Some(o);
+                        break;
+                    }
+                    Ok(_) => {}
                     Err(TryRecvError::Empty) => break,
                 }
                 hubo = true;
             }
-            if !hubo || pausado {
+            if !hubo || pausado || diferida.is_some() {
                 break;
             }
+        }
+        if diferida.is_some() {
+            continue;
         }
         if pausado {
             espera = None;
@@ -195,7 +290,7 @@ fn una_ronda(
             Avance::Listando { vistos } => (Fase::Listando { vistos }, None, false),
             Avance::Copiando { hechas, total, actual } => (Fase::Copiando { hechas, total }, Some(actual), hechas == total),
             // Breve, sin relistar: se muestra siempre (no se descarta por el límite de avisos por segundo).
-            Avance::RenovandoEnlaces { n, hechas, total } => (Fase::Copiando { hechas, total }, Some(format!("Renovando enlaces ({n})…")), true),
+            Avance::RenovandoEnlaces { n, hechas, total } => (Fase::Copiando { hechas, total }, Some(tf(T::AvRenovando, &[("n", &n)])), true),
         };
         let mut r = ritmo.lock().unwrap();
         if let (Fase::Copiando { total, .. }, None) = (&fase, &r.3) {
@@ -252,7 +347,7 @@ fn una_ronda(
             // Solo si se aplazaron archivos para relistar (no los que ya no estaban al renovar enlaces).
             *renovar = r.fin == FinRonda::Relistar && r.aplazadas > 0;
             if r.verificadas > 0 {
-                aviso(emitir, format!("{} archivos nuevos copiados y verificados", r.verificadas));
+                aviso(emitir, tf(T::AvCopiados, &[("n", &miles(r.verificadas as u64))]));
             }
             let nuevo = *ultimo_fin != Some(r.fin);
             *ultimo_fin = Some(r.fin);
@@ -261,13 +356,13 @@ fn una_ronda(
                 FinRonda::Cancelada => Fase::Pausada,
                 FinRonda::SesionCaducada => {
                     if nuevo {
-                        aviso(emitir, "La sesión de iCloud caducó. Menú del icono → Iniciar sesión en iCloud…");
+                        aviso(emitir, t(T::AvSesion));
                     }
                     Fase::SesionCaducada
                 }
                 FinRonda::SinEspacio => {
                     if nuevo {
-                        aviso(emitir, format!("No queda espacio en {}", destino.display()));
+                        aviso(emitir, tf(T::AvSinEspacio, &[("d", &destino.display())]));
                     }
                     Fase::SinEspacio
                 }
@@ -284,7 +379,7 @@ fn verificar(cfg: &Config, cancelar: &AtomicBool, emitir: &(dyn Fn(EventoUi) + S
     let Some(destino) = cfg.destino.clone() else { return };
     let dir_datos = destino.join(".icopia");
     let Ok(Some(_cerrojo)) = cerrojo::intentar(&dir_datos) else {
-        aviso(emitir, "Hay una copia en marcha; vuelve a intentarlo luego.");
+        aviso(emitir, t(T::AvCopiaEnMarcha));
         return;
     };
     let Ok(reg) = abrir_registro(&destino) else { return };
@@ -296,14 +391,14 @@ fn verificar(cfg: &Config, cancelar: &AtomicBool, emitir: &(dyn Fn(EventoUi) + S
         }
     });
     match r {
-        Ok(res) if res.malas.is_empty() => aviso(emitir, format!("Verificación completa: {} archivos en perfecto estado", res.revisadas)),
+        Ok(res) if res.malas.is_empty() => aviso(emitir, tf(T::AvVerificado, &[("n", &miles(res.revisadas as u64))])),
         Ok(res) => {
             for (ruta, m) in &res.malas {
                 bitacora::escribir(&dir_datos, &format!("DAÑADO {ruta}: {m}"));
             }
-            aviso(emitir, format!("{} archivos dañados o ausentes; se volverán a descargar", res.malas.len()));
+            aviso(emitir, tf(T::AvDanados, &[("n", &miles(res.malas.len() as u64))]));
         }
-        Err(e) => aviso(emitir, format!("No se pudo verificar: {e}")),
+        Err(e) => aviso(emitir, tf(T::AvNoVerificado, &[("e", &e)])),
     }
     drop(reg);
     emitir_resumen(cfg, Fase::Inactiva, emitir);

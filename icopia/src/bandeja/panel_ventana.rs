@@ -69,6 +69,8 @@ pub enum Accion {
     /// El botón principal (Pausar, Reanudar, Revisar ahora o Iniciar sesión).
     Principal(Principal),
     AbrirCarpeta,
+    /// Abrir el asistente "Liberar espacio en iCloud".
+    Liberar,
 }
 
 pub struct Panel {
@@ -98,8 +100,8 @@ pub struct Panel {
     gancho: Option<isize>,
     /// Último avance de "liberar espacio" leído del registro.
     liberar: Option<ProgresoLiberar>,
-    /// Alto actual del panel a 96 ppp (crece con la sección de liberar).
-    alto: i32,
+    /// Alto actual del panel a 96 ppp (crece con la sección de liberar) y botones del pie.
+    pie: panel_gdi::Pie,
 }
 
 impl Panel {
@@ -139,7 +141,7 @@ impl Panel {
             t0: Instant::now(),
             gancho: None,
             liberar: None,
-            alto: panel_gdi::ALTO,
+            pie: panel_gdi::Pie::default(),
         }
     }
 
@@ -305,7 +307,7 @@ impl Panel {
             let (mut dx, mut dy) = (96u32, 96u32);
             GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dx, &mut dy);
             let escala = dx as f32 / 96.0;
-            let (w, h) = ((panel_gdi::ANCHO as f32 * escala).round() as i32, (self.alto as f32 * escala).round() as i32);
+            let (w, h) = ((panel_gdi::ANCHO as f32 * escala).round() as i32, (self.pie.alto as f32 * escala).round() as i32);
             let margen = (12.0 * escala).round() as i32;
             let (m, t) = (info.rcMonitor, info.rcWork);
             // La barra de tareas puede estar abajo (lo normal), arriba o a un lado.
@@ -321,7 +323,7 @@ impl Panel {
     /// Muestra el panel junto a la bandeja; con `activar`, además le da el foco.
     pub fn mostrar(&mut self, ancla: (i32, i32), estado: &EstadoUi, activar: bool) {
         self.ancla = ancla;
-        self.alto = panel_gdi::alto(&self.vista_actual(estado));
+        self.pie = panel_gdi::pie(&self.vista_actual(estado));
         self.colocar();
         self.oscuro = panel_gdi::tema_oscuro();
         self.hover = None;
@@ -367,10 +369,13 @@ impl Panel {
     /// Repinta el contenido y lo lleva a la pantalla.
     pub fn refrescar(&mut self, estado: &EstadoUi) {
         if self.visible() {
-            let alto = panel_gdi::alto(&self.vista_actual(estado));
-            if alto != self.alto {
-                self.alto = alto;
-                self.colocar();
+            let pie = panel_gdi::pie(&self.vista_actual(estado));
+            if pie != self.pie {
+                if pie.alto != self.pie.alto {
+                    self.pie = pie;
+                    self.colocar();
+                }
+                self.pie = pie;
                 self.hover = None;
             }
             self.pintar(estado);
@@ -403,6 +408,8 @@ impl Panel {
         let ahora = chrono::Utc::now().timestamp();
         let mut v = vista(estado, medidas, ahora);
         v.liberar = self.liberar.as_ref().and_then(|p| vista_liberar(p, ahora));
+        // Mientras se libera espacio, el botón sobra (ya hay uno en marcha).
+        v.boton_liberar &= v.liberar.as_ref().is_none_or(|l| l.tono != crate::bandeja::panel::TonoLiberar::Activo);
         v
     }
 
@@ -426,7 +433,7 @@ impl Panel {
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed && event.logical_key == Key::Escape => self.ocultar(),
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x / self.escala as f64, position.y / self.escala as f64);
-                let b = panel_gdi::boton_en(self.cursor.0, self.cursor.1, self.alto);
+                let b = panel_gdi::boton_en(self.cursor.0, self.cursor.1, self.pie);
                 if b != self.hover {
                     self.hover = b;
                     self.refrescar(estado);
@@ -437,12 +444,13 @@ impl Panel {
                     self.refrescar(estado);
                 }
             }
-            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => self.pulsado = panel_gdi::boton_en(self.cursor.0, self.cursor.1, self.alto),
+            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => self.pulsado = panel_gdi::boton_en(self.cursor.0, self.cursor.1, self.pie),
             WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. } => {
-                let suelto = panel_gdi::boton_en(self.cursor.0, self.cursor.1, self.alto);
+                let suelto = panel_gdi::boton_en(self.cursor.0, self.cursor.1, self.pie);
                 return self.pulsado.take().filter(|&b| Some(b) == suelto).map(|b| match b {
                     Boton::Pausa => Accion::Principal(principal(estado)),
                     Boton::Carpeta => Accion::AbrirCarpeta,
+                    Boton::Liberar => Accion::Liberar,
                 });
             }
             _ => {}

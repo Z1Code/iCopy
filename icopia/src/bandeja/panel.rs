@@ -1,6 +1,7 @@
 //! Lógica del panel de progreso de la bandeja (sin dibujo): textos, indicador, velocidad y
 //! tiempo restante.
 use crate::bandeja::estado::{miles, EstadoUi, Fase};
+use crate::i18n::{decimal1, t, tf, T};
 use crate::progreso_liberar::{FaseLiberar, ProgresoLiberar, Situacion};
 use std::collections::VecDeque;
 
@@ -18,15 +19,15 @@ pub enum Indicador {
 
 impl Indicador {
     pub fn texto(self) -> &'static str {
-        match self {
-            Indicador::EnVivo => "En vivo",
-            Indicador::AlDia => "Al día",
-            Indicador::EnEspera => "En espera",
-            Indicador::EnPausa => "En pausa",
-            Indicador::InicieSesion => "Inicia sesión",
-            Indicador::Atencion => "Atención",
-            Indicador::Error => "Error",
-        }
+        t(match self {
+            Indicador::EnVivo => T::IndVivo,
+            Indicador::AlDia => T::IndAlDia,
+            Indicador::EnEspera => T::IndEspera,
+            Indicador::EnPausa => T::IndPausa,
+            Indicador::InicieSesion => T::IndSesion,
+            Indicador::Atencion => T::IndAtencion,
+            Indicador::Error => T::IndError,
+        })
     }
 
     /// El punto late solo mientras hay trabajo en marcha.
@@ -87,7 +88,7 @@ impl Velocimetro {
 /// Número con coma decimal: un decimal por debajo de 10, entero a partir de ahí.
 fn num(x: f64) -> String {
     if x < 10.0 && x.fract().abs() > 0.05 {
-        format!("{x:.1}").replace('.', ",")
+        decimal1(x)
     } else {
         miles(x.round() as u64)
     }
@@ -109,15 +110,15 @@ pub fn par_bytes(a: u64, b: u64) -> String {
     let (u, nombre) = unidad(a.max(b));
     let (x, y) = (a as f64 / u, b as f64 / u);
     // Por debajo de 10, las dos cifras con un decimal para que se vea el avance.
-    let f = |v: f64| if y < 10.0 && u > 1.0 { format!("{v:.1}").replace('.', ",") } else { num(v) };
-    format!("{} de {} {nombre}", f(x), f(y))
+    let f = |v: f64| if y < 10.0 && u > 1.0 { decimal1(v) } else { num(v) };
+    tf(T::ParBytes, &[("a", &f(x)), ("b", &f(y)), ("u", &nombre)])
 }
 
 /// "12,4 MB/s"
 pub fn velocidad(bps: f64) -> String {
     let (u, nombre) = unidad(bps.max(0.0) as u64);
     let x = bps.max(0.0) / u;
-    let cifra = if x < 100.0 { format!("{x:.1}").replace('.', ",") } else { miles(x.round() as u64) };
+    let cifra = if x < 100.0 { decimal1(x) } else { miles(x.round() as u64) };
     format!("{cifra} {nombre}/s")
 }
 
@@ -125,27 +126,27 @@ pub fn velocidad(bps: f64) -> String {
 pub fn duracion(segundos: u64) -> String {
     let min = segundos.div_ceil(60);
     if segundos < 60 {
-        "menos de 1 min".into()
+        t(T::MenosDeUnMin).into()
     } else if min < 60 {
-        format!("~{min} min")
+        tf(T::DurMin, &[("m", &min)])
     } else if min < 48 * 60 {
         let (h, m) = (min / 60, min % 60);
         if m == 0 {
-            format!("~{h} h")
+            tf(T::DurH, &[("h", &h)])
         } else {
-            format!("~{h} h {m} min")
+            tf(T::DurHMin, &[("h", &h), ("m", &m)])
         }
     } else {
-        format!("~{} días", min.div_ceil(24 * 60))
+        tf(T::DurDias, &[("d", &min.div_ceil(24 * 60))])
     }
 }
 
 /// "~58 min restantes"
 pub fn restante(segundos: u64) -> String {
     if segundos < 60 {
-        "menos de 1 min restante".into()
+        t(T::RestanteMenos).into()
     } else {
-        format!("{} restantes", duracion(segundos))
+        tf(T::Restantes, &[("d", &duracion(segundos))])
     }
 }
 
@@ -153,11 +154,11 @@ pub fn restante(segundos: u64) -> String {
 pub fn hace(segundos: i64) -> String {
     let s = segundos.max(0);
     match s {
-        0..=59 => "hace un momento".into(),
-        60..=3599 => format!("hace {} min", s / 60),
-        3600..=86399 => format!("hace {} h", s / 3600),
-        _ if s / 86400 == 1 => "hace 1 día".into(),
-        _ => format!("hace {} días", s / 86400),
+        0..=59 => t(T::HaceMomento).into(),
+        60..=3599 => tf(T::HaceMin, &[("n", &(s / 60))]),
+        3600..=86399 => tf(T::HaceH, &[("n", &(s / 3600))]),
+        _ if s / 86400 == 1 => t(T::HaceDia).into(),
+        _ => tf(T::HaceDias, &[("n", &(s / 86400))]),
     }
 }
 
@@ -178,12 +179,12 @@ pub enum Principal {
 
 impl Principal {
     pub fn texto(self) -> &'static str {
-        match self {
-            Principal::Pausar => "Pausar",
-            Principal::Reanudar => "Reanudar",
-            Principal::RevisarAhora => "Revisar ahora",
-            Principal::IniciarSesion => "Iniciar sesión",
-        }
+        t(match self {
+            Principal::Pausar => T::BotPausar,
+            Principal::Reanudar => T::BotReanudar,
+            Principal::RevisarAhora => T::BotRevisar,
+            Principal::IniciarSesion => T::BotSesion,
+        })
     }
 }
 
@@ -235,7 +236,7 @@ impl MediaRonda {
 
 /// "~1.250 elementos/min"
 pub fn ritmo(elementos_por_seg: f64) -> String {
-    format!("~{} elementos/min", miles((elementos_por_seg * 60.0).round() as u64))
+    tf(T::Ritmo, &[("n", &miles((elementos_por_seg * 60.0).round() as u64))])
 }
 
 /// Todo lo que muestra el panel, ya en texto.
@@ -258,6 +259,8 @@ pub struct Vista {
     pub principal: Principal,
     /// Sección de "liberar espacio" (solo si hay uno en marcha o terminado hace menos de un día).
     pub liberar: Option<VistaLiberar>,
+    /// Botón "Liberar espacio…" en el pie: con todo copiado y verificado.
+    pub boton_liberar: bool,
 }
 
 /// Color de la sección de liberar.
@@ -293,12 +296,12 @@ pub fn par_bytes_dec(a: u64, b: u64) -> String {
     let (u, nombre) = unidad(a.max(b));
     let grande = b as f64 / u >= 100.0;
     let f = |v: u64| dec(v as f64 / u, u > 1.0 && !grande);
-    format!("{} de {} {nombre}", f(a), f(b))
+    tf(T::ParBytes, &[("a", &f(a)), ("b", &f(b)), ("u", &nombre)])
 }
 
 fn dec(x: f64, decimal: bool) -> String {
     if decimal && x < 100.0 {
-        format!("{x:.1}").replace('.', ",")
+        decimal1(x)
     } else {
         miles(x.round() as u64)
     }
@@ -312,78 +315,81 @@ fn pct(p: &ProgresoLiberar) -> u64 {
 pub fn vista_liberar(p: &ProgresoLiberar, ahora_unix: i64) -> Option<VistaLiberar> {
     let sit = p.situacion(ahora_unix)?;
     let eta = p.restante_seg().filter(|_| !p.en_pausa).map(|s| format!(" · {}", duracion(s))).unwrap_or_default();
+    let cuando = hace(ahora_unix - p.actualizado_unix);
     let v = match sit {
         Situacion::EnCurso => {
             let (subtitulo, fraccion, linea) = match p.fase {
-                FaseLiberar::Listando if p.total > 0 => {
-                    ("Consultando iCloud…", p.fraccion(), format!("{} de ~{} elementos{eta}", miles(p.hechos), miles(p.total)))
-                }
-                FaseLiberar::Listando => ("Consultando iCloud…", None, format!("{} elementos vistos", miles(p.hechos))),
+                FaseLiberar::Listando if p.total > 0 => (
+                    T::LibConsultando,
+                    p.fraccion(),
+                    tf(T::LibListandoDe, &[("v", &miles(p.hechos)), ("t", &miles(p.total)), ("eta", &eta)]),
+                ),
+                FaseLiberar::Listando => (T::LibConsultando, None, tf(T::LibVistos, &[("n", &miles(p.hechos))])),
                 _ => (
                     match p.fase {
-                        FaseLiberar::Borrando if p.en_pausa => "En pausa",
-                        FaseLiberar::Borrando => "Borrando en iCloud…",
-                        _ => "Comprobando archivos en disco…",
+                        FaseLiberar::Borrando if p.en_pausa => T::LibPausa,
+                        FaseLiberar::Borrando => T::LibBorrando,
+                        _ => T::LibComprobando,
                     },
                     p.fraccion().or(Some(0.0)),
                     format!("{} / {} · {} % · {}{eta}", miles(p.hechos), miles(p.total), pct(p), par_bytes_dec(p.bytes_hechos, p.bytes_total)),
                 ),
             };
             let linea2 = match p.fase {
-                FaseLiberar::Borrando if p.fallidos > 0 => format!("{} no se pudieron borrar · se reintentarán", miles(p.fallidos)),
-                FaseLiberar::Borrando => "Van a «Eliminado recientemente» · el PC no se toca".into(),
-                _ => format!("Se conservan los últimos {} días y la Fototeca Compartida", p.dias),
+                FaseLiberar::Borrando if p.fallidos > 0 => tf(T::LibFallidosReintento, &[("n", &miles(p.fallidos))]),
+                FaseLiberar::Borrando => t(T::LibVanAPapelera).into(),
+                _ => tf(T::LibConserva, &[("d", &p.dias)]),
             };
-            VistaLiberar { titulo: "Liberando espacio en iCloud".into(), subtitulo: subtitulo.into(), fraccion, linea, linea2, tono: TonoLiberar::Activo }
+            VistaLiberar { titulo: t(T::LibTitulo).into(), subtitulo: t(subtitulo).into(), fraccion, linea, linea2, tono: TonoLiberar::Activo }
         }
         Situacion::Confirmando => VistaLiberar {
-            titulo: "Liberando espacio en iCloud".into(),
-            subtitulo: "Esperando tu confirmación…".into(),
+            titulo: t(T::LibTitulo).into(),
+            subtitulo: t(T::LibEsperando).into(),
             fraccion: Some(0.0),
-            linea: format!("Listos para borrar: {} elementos · {}", miles(p.total), bytes_dec(p.bytes_total)),
-            linea2: "Escribe BORRAR en la ventana de la consola".into(),
+            linea: tf(T::LibListos, &[("n", &miles(p.total)), ("b", &bytes_dec(p.bytes_total))]),
+            linea2: t(T::LibConfirma).into(),
             tono: TonoLiberar::Activo,
         },
         Situacion::Terminado if p.cancelado => VistaLiberar {
-            titulo: "Liberación cancelada".into(),
-            subtitulo: format!("Cancelada {}", hace(ahora_unix - p.actualizado_unix)),
+            titulo: t(T::LibTituloCancelado).into(),
+            subtitulo: tf(T::LibCancelada, &[("hace", &cuando)]),
             fraccion: p.fraccion(),
-            linea: format!("Liberados {} ({} de {} elementos)", bytes_dec(p.bytes_hechos), miles(p.borrados), miles(p.total)),
-            linea2: "Vacía «Eliminado recientemente» para recuperarlo".into(),
+            linea: tf(T::LibLiberadosParcial, &[("b", &bytes_dec(p.bytes_hechos)), ("h", &miles(p.borrados)), ("t", &miles(p.total))]),
+            linea2: t(T::LibVacia).into(),
             tono: TonoLiberar::Hecho,
         },
         Situacion::Terminado => {
-            let mut subtitulo = format!("Terminado {}", hace(ahora_unix - p.actualizado_unix));
+            let mut subtitulo = tf(T::LibTerminado, &[("hace", &cuando)]);
             if p.fallidos > 0 {
-                subtitulo.push_str(&format!(" · {} no se pudieron borrar", miles(p.fallidos)));
+                subtitulo.push_str(&tf(T::LibNoBorrados, &[("n", &miles(p.fallidos))]));
             }
+            let liberados = if p.borrados == 1 { T::LibLiberados1 } else { T::LibLiberadosN };
             VistaLiberar {
-                titulo: "Espacio liberado en iCloud".into(),
+                titulo: t(T::LibTituloHecho).into(),
                 subtitulo,
                 fraccion: Some(1.0),
-                linea: format!("Liberados {} ({})", bytes_dec(p.bytes_hechos), plural(p.borrados, "elemento", "elementos")),
-                linea2: "Vacía «Eliminado recientemente» para recuperarlo".into(),
+                linea: tf(liberados, &[("b", &bytes_dec(p.bytes_hechos)), ("n", &miles(p.borrados))]),
+                linea2: t(T::LibVacia).into(),
                 tono: TonoLiberar::Hecho,
             }
         }
         Situacion::Fallido | Situacion::Interrumpido => {
-            let cuando = hace(ahora_unix - p.actualizado_unix);
             let subtitulo = match (&p.error, sit) {
-                (Some(e), Situacion::Fallido) => format!("Falló {cuando}: {e}"),
-                (None, Situacion::Fallido) => format!("Falló {cuando}"),
-                _ => format!("Se detuvo {cuando} sin terminar"),
+                (Some(e), Situacion::Fallido) => tf(T::LibFalloMotivo, &[("hace", &cuando), ("e", e)]),
+                (None, Situacion::Fallido) => tf(T::LibFallo, &[("hace", &cuando)]),
+                _ => tf(T::LibDetenido, &[("hace", &cuando)]),
             };
             let linea = if p.borrados > 0 {
-                format!("Borrados {} de {} · {}", miles(p.borrados), miles(p.total), bytes_dec(p.bytes_hechos))
+                tf(T::LibBorradosDe, &[("h", &miles(p.borrados)), ("t", &miles(p.total)), ("b", &bytes_dec(p.bytes_hechos))])
             } else {
-                "No se borró nada de iCloud".into()
+                t(T::LibNadaBorrado).into()
             };
             VistaLiberar {
-                titulo: "No se terminó de liberar espacio".into(),
+                titulo: t(T::LibTituloProblema).into(),
                 subtitulo,
                 fraccion: p.fraccion().filter(|_| p.borrados > 0),
                 linea,
-                linea2: "Puedes volver a intentarlo desde el menú del icono".into(),
+                linea2: t(T::LibReintentar).into(),
                 tono: TonoLiberar::Problema,
             }
         }
@@ -393,21 +399,24 @@ pub fn vista_liberar(p: &ProgresoLiberar, ahora_unix: i64) -> Option<VistaLibera
 
 /// Texto del tooltip mientras se libera espacio (solo en marcha); `None` en otro caso.
 pub fn texto_bandeja_liberar(p: &ProgresoLiberar, ahora_unix: i64) -> Option<String> {
-    let t = match (p.situacion(ahora_unix)?, p.fase) {
-        (Situacion::Confirmando, _) => "Liberando iCloud: esperando tu confirmación".to_string(),
-        (Situacion::EnCurso, FaseLiberar::Listando) => format!("Liberando iCloud: consultando… ({} vistos)", miles(p.hechos)),
-        (Situacion::EnCurso, FaseLiberar::Reverificando) => format!("Liberando iCloud: comprobando {} de {}", miles(p.hechos), miles(p.total)),
+    let (h, total) = (miles(p.hechos), miles(p.total));
+    let texto = match (p.situacion(ahora_unix)?, p.fase) {
+        (Situacion::Confirmando, _) => t(T::TipConfirmacion).to_string(),
+        (Situacion::EnCurso, FaseLiberar::Listando) => tf(T::TipConsultando, &[("n", &h)]),
+        (Situacion::EnCurso, FaseLiberar::Reverificando) => tf(T::TipComprobando, &[("h", &h), ("t", &total)]),
+        (Situacion::EnCurso, _) if p.en_pausa => tf(T::TipEnPausa, &[("h", &h), ("t", &total)]),
         (Situacion::EnCurso, _) => {
             let eta = p.restante_seg().map(|s| format!(" · {}", duracion(s))).unwrap_or_default();
-            format!("Liberando iCloud: {} de {} borrados ({} %){eta}", miles(p.hechos), miles(p.total), pct(p))
+            tf(T::TipBorrando, &[("h", &h), ("t", &total), ("p", &pct(p)), ("eta", &eta)])
         }
         _ => return None,
     };
-    Some(t)
+    Some(texto)
 }
 
-fn plural(n: u64, uno: &str, varios: &str) -> String {
-    format!("{} {}", miles(n), if n == 1 { uno } else { varios })
+/// Texto en singular o plural con el número en `{n}`.
+fn plural(n: u64, uno: T, varios: T) -> String {
+    tf(if n == 1 { uno } else { varios }, &[("n", &miles(n))])
 }
 
 /// Se recalcula entera en cada refresco a partir del estado vivo (nada se guarda entre llamadas).
@@ -417,35 +426,36 @@ pub fn vista(e: &EstadoUi, m: Medidas, ahora_unix: i64) -> Vista {
     let vel = m.bytes_por_seg.filter(|v| e.trabajando() && *v > 0.0);
     let ritmo_listado = m.elementos_por_seg.filter(|v| *v > 0.0);
     let titulo = match &e.fase {
-        Fase::Listando { .. } if d.renovando_enlaces => "Renovando enlaces de iCloud…".to_string(),
-        Fase::Listando { vistos: 0 } => "Revisando iCloud…".to_string(),
-        Fase::Listando { vistos } => format!("Revisando iCloud… ({} vistos)", miles(*vistos as u64)),
+        Fase::Listando { .. } if d.renovando_enlaces => t(T::TitRenovando).to_string(),
+        Fase::Listando { vistos: 0 } => t(T::TitRevisando).to_string(),
+        Fase::Listando { vistos } => tf(T::TitRevisandoN, &[("n", &miles(*vistos as u64))]),
         Fase::Copiando { total, .. } => {
             let n = d.ronda.as_ref().map(|r| r.archivos).unwrap_or(*total as u64);
-            format!("Copiando {}", plural(n, "nuevo", "nuevos"))
+            plural(n, T::TitCopiando1, T::TitCopiandoN)
         }
-        Fase::Verificando { .. } => "Verificando tu copia".into(),
-        Fase::Inactiva if ind == Indicador::AlDia && e.total > 0 => "Al día".into(),
-        Fase::Inactiva if e.total == 0 => "Aún no hay nada copiado".into(),
-        Fase::Inactiva => "En espera".into(),
-        Fase::Pausada => "Copia en pausa".into(),
-        Fase::SesionCaducada => "Tienes que iniciar sesión en iCloud".into(),
-        Fase::SinEspacio => "No queda espacio en el disco".into(),
-        Fase::DestinoAusente => "No encuentro la carpeta destino".into(),
-        Fase::SinDestino => "Elige una carpeta destino".into(),
-        Fase::Error(_) => "Algo ha fallado".into(),
+        Fase::Verificando { .. } => t(T::TitVerificando).into(),
+        Fase::Inactiva if ind == Indicador::AlDia && e.total > 0 => t(T::TitAlDia).into(),
+        Fase::Inactiva if e.total == 0 => t(T::TitVacio).into(),
+        Fase::Inactiva => t(T::TitEspera).into(),
+        Fase::Pausada => t(T::TitPausa).into(),
+        Fase::SesionCaducada => t(T::TitSesion).into(),
+        Fase::SinEspacio => t(T::TitSinEspacio).into(),
+        Fase::DestinoAusente => t(T::TitSinDestino).into(),
+        Fase::SinDestino => t(T::TitElige).into(),
+        Fase::Error(_) => t(T::TitFallo).into(),
     };
     let fraccion_total = if d.bytes_total > 0 { d.bytes_verificados as f64 / d.bytes_total as f64 } else { 0.0 };
     let revisiones = || {
         let mut partes = Vec::new();
-        if let Some(t) = d.ultimo_listado {
-            partes.push(format!("Última revisión {}", hace(ahora_unix - t)));
+        if let Some(u) = d.ultimo_listado {
+            partes.push(tf(T::UltimaRevision, &[("hace", &hace(ahora_unix - u))]));
         }
         if let Some(p) = d.proxima.filter(|&p| p > ahora_unix) {
-            partes.push(format!("{} en {}", if partes.is_empty() { "Próxima" } else { "próxima" }, duracion((p - ahora_unix) as u64)));
+            let clave = if partes.is_empty() { T::ProximaMay } else { T::ProximaMin };
+            partes.push(tf(clave, &[("d", &duracion((p - ahora_unix) as u64))]));
         }
         if partes.is_empty() {
-            "Todavía no se ha revisado iCloud".to_string()
+            t(T::NuncaRevisado).to_string()
         } else {
             partes.join(" · ")
         }
@@ -455,14 +465,14 @@ pub fn vista(e: &EstadoUi, m: Medidas, ahora_unix: i64) -> Vista {
         Fase::Listando { vistos } => match d.listado_previsto.filter(|&p| p > 0) {
             Some(p) => {
                 let v = *vistos as u64;
-                let mut l = format!("{} de ~{}", miles(v), miles(p));
+                let mut l = tf(T::ListandoPrevisto, &[("v", &miles(v)), ("p", &miles(p))]);
                 if let (Some(r), true) = (ritmo_listado, v < p) {
                     l.push_str(" · ");
                     l.push_str(&restante(((p - v) as f64 / r) as u64));
                 }
                 (Some(v as f64 / p as f64), l)
             }
-            None => (None, "Buscando fotos y vídeos nuevos".to_string()),
+            None => (None, t(T::BuscandoNuevos).to_string()),
         },
         Fase::Copiando { hechas, total } => match &d.ronda {
             Some(r) if r.bytes > 0 => {
@@ -477,44 +487,47 @@ pub fn vista(e: &EstadoUi, m: Medidas, ahora_unix: i64) -> Vista {
             }
             _ => {
                 let f = if *total > 0 { *hechas as f64 / *total as f64 } else { 0.0 };
-                (Some(f), format!("{} de {} archivos", miles(*hechas as u64), miles(*total as u64)))
+                (Some(f), tf(T::ArchivosDe, &[("h", &miles(*hechas as u64)), ("t", &miles(*total as u64))]))
             }
         },
         Fase::Verificando { hechas, total } => (
             Some(if *total > 0 { *hechas as f64 / *total as f64 } else { 0.0 }),
-            format!("{} de {} archivos revisados", miles(*hechas as u64), miles(*total as u64)),
+            tf(T::RevisadosDe, &[("h", &miles(*hechas as u64)), ("t", &miles(*total as u64))]),
         ),
         Fase::Error(m) => (Some(fraccion_total), m.chars().take(90).collect()),
         _ => (Some(fraccion_total), revisiones()),
     };
     let linea_total = if e.total > 0 {
-        format!("Fototeca: {} de {} archivos · {}", miles(e.verificadas), miles(e.total), par_bytes(d.bytes_verificados, d.bytes_total))
+        tf(T::Fototeca, &[("v", &miles(e.verificadas)), ("t", &miles(e.total)), ("b", &par_bytes(d.bytes_verificados, d.bytes_total))])
     } else {
-        "Fototeca: aún vacía".into()
+        t(T::FototecaVacia).into()
     };
     let pendientes = e.total.saturating_sub(e.verificadas);
     let ahora = match (&e.fase, &d.actual) {
-        (Fase::Listando { .. }, _) if d.renovando_enlaces => "Renovando enlaces de iCloud".to_string(),
-        (Fase::Listando { .. }, _) => "Consultando tu fototeca en iCloud".into(),
+        (Fase::Listando { .. }, _) if d.renovando_enlaces => t(T::AhoraRenovando).to_string(),
+        (Fase::Listando { .. }, _) => t(T::AhoraConsultando).into(),
         (Fase::Copiando { .. }, Some(a)) => a.clone(),
-        (Fase::Copiando { .. }, None) => "Preparando la copia".into(),
-        (Fase::Verificando { .. }, _) => "Comprobando los archivos copiados".into(),
-        (Fase::Inactiva, _) if e.total == 0 => "Esperando la primera revisión".into(),
-        (Fase::Inactiva, _) if pendientes == 0 => "Nada pendiente".into(),
-        (Fase::Inactiva | Fase::Pausada, _) if pendientes > 0 => plural(pendientes, "archivo pendiente", "archivos pendientes"),
-        (Fase::Pausada, _) => "Nada pendiente".into(),
-        (Fase::SesionCaducada, _) => "Esperando a que inicies sesión".into(),
-        (Fase::SinEspacio, _) => "Libera espacio en el disco destino".into(),
-        (Fase::DestinoAusente, _) => "Conecta el disco o elige otra carpeta".into(),
-        (Fase::SinDestino, _) => "Elige la carpeta en el menú del icono".into(),
-        (Fase::Error(_), _) => "Se reintentará en la próxima ronda".into(),
-        (Fase::Inactiva, _) => "Nada pendiente".into(),
+        (Fase::Copiando { .. }, None) => t(T::AhoraPreparando).into(),
+        (Fase::Verificando { .. }, _) => t(T::AhoraComprobando).into(),
+        (Fase::Inactiva, _) if e.total == 0 => t(T::AhoraPrimera).into(),
+        (Fase::Inactiva, _) if pendientes == 0 => t(T::AhoraNada).into(),
+        (Fase::Inactiva | Fase::Pausada, _) if pendientes > 0 => plural(pendientes, T::Pendiente1, T::PendientesN),
+        (Fase::Pausada, _) => t(T::AhoraNada).into(),
+        (Fase::SesionCaducada, _) => t(T::AhoraSesion).into(),
+        (Fase::SinEspacio, _) => t(T::AhoraEspacio).into(),
+        (Fase::DestinoAusente, _) => t(T::AhoraDisco).into(),
+        (Fase::SinDestino, _) => t(T::AhoraMenu).into(),
+        (Fase::Error(_), _) => t(T::AhoraReintento).into(),
+        (Fase::Inactiva, _) => t(T::AhoraNada).into(),
     };
     let (etiqueta_velocidad, velocidad_txt) = match &e.fase {
-        Fase::Listando { .. } => ("Ritmo", ritmo_listado.map(ritmo).unwrap_or_else(|| "midiendo…".into())),
-        Fase::Copiando { .. } => ("Velocidad", vel.map(velocidad).unwrap_or_else(|| "midiendo…".into())),
-        Fase::Verificando { .. } => ("Velocidad", "sin descargas (solo comprueba)".into()),
-        _ => ("Velocidad media", m.media_ultima_ronda.map(|v| format!("{} (última ronda)", velocidad(v))).unwrap_or_else(|| "sin descargas recientes".into())),
+        Fase::Listando { .. } => (t(T::EtqRitmo), ritmo_listado.map(ritmo).unwrap_or_else(|| t(T::Midiendo).into())),
+        Fase::Copiando { .. } => (t(T::EtqVelocidad), vel.map(velocidad).unwrap_or_else(|| t(T::Midiendo).into())),
+        Fase::Verificando { .. } => (t(T::EtqVelocidad), t(T::SinDescargasComprueba).into()),
+        _ => (
+            t(T::EtqMedia),
+            m.media_ultima_ronda.map(|v| tf(T::UltimaRonda, &[("v", &velocidad(v))])).unwrap_or_else(|| t(T::SinDescargas).into()),
+        ),
     };
     Vista {
         indicador: ind,
@@ -525,10 +538,11 @@ pub fn vista(e: &EstadoUi, m: Medidas, ahora_unix: i64) -> Vista {
         ahora,
         etiqueta_velocidad,
         velocidad: velocidad_txt,
-        listado: d.ultimo_listado.map(|t| hace(ahora_unix - t)).unwrap_or_else(|| "nunca".into()),
+        listado: d.ultimo_listado.map(|u| hace(ahora_unix - u)).unwrap_or_else(|| t(T::Nunca).into()),
         errores: miles(d.con_error),
         principal: principal(e),
         liberar: None,
+        boton_liberar: ind == Indicador::AlDia,
     }
 }
 
@@ -735,6 +749,20 @@ mod tests {
             por_seg: Some((total - hechos) as f64 / (14.0 * 60.0)),
             ..ProgresoLiberar::nuevo(30, 0)
         }
+    }
+
+    #[test]
+    fn en_ingles() {
+        use crate::i18n::{con_idioma, Idioma};
+        con_idioma(Idioma::En, || {
+            let p = liberar(FaseLiberar::Borrando, 2_350, 11_029);
+            let v = vista_liberar(&p, 1_000_005).unwrap();
+            assert_eq!((v.titulo.as_str(), v.subtitulo.as_str()), ("Freeing up iCloud space", "Deleting from iCloud…"));
+            assert_eq!(v.linea, "2,350 / 11,029 · 21 % · 16.1 of 74.7 GB · ~14 min");
+            assert_eq!(hace(3 * 3600), "3 h ago");
+            let e = EstadoUi::con_progreso(Fase::Inactiva, &progreso(10, 10, 10, 10));
+            assert_eq!(vista(&e, Medidas::default(), 1000).titulo, "Up to date");
+        });
     }
 
     #[test]
