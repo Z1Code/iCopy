@@ -2,6 +2,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use icopia::auditoria;
 use icopia::cerrojo;
 use icopia::config::{self, Config};
+use icopia::criterio::Criterio;
 use icopia::descarga;
 use icopia::energia::SinSuspension;
 use icopia::fuente::FuenteIcloud;
@@ -27,7 +28,11 @@ Uso:
   icopia copiar [--mes AAAA-MM]  Copia y verifica lo que falte
   icopia estado                  Resumen de lo copiado
   icopia verificar               Vuelve a comprobar todo lo copiado
-  icopia liberar [--dias N]      Borra de iCloud lo ya copiado y verificado (pide confirmación)
+  icopia liberar [--dias N | --anios 2019,2020]
+                                 Borra de iCloud lo ya copiado y verificado (pide confirmación;
+                                 siempre conserva al menos los últimos 30 días)
+  icopia restaurar --ultima | --sesion ID
+                                 Saca de \"Eliminado recientemente\" lo borrado en una liberación
 ";
 
 fn main() {
@@ -56,6 +61,7 @@ fn ejecutar(args: &[String]) -> Result<()> {
         Some("estado") => cmd_estado(),
         Some("verificar") => cmd_verificar(),
         Some("liberar") => cmd_liberar(args),
+        Some("restaurar") => cmd_restaurar(args),
         _ => {
             print!("{AYUDA}");
             Ok(())
@@ -283,12 +289,52 @@ fn cmd_verificar() -> Result<()> {
     Ok(())
 }
 
+fn cmd_restaurar(args: &[String]) -> Result<()> {
+    let cfg = Config::cargar()?;
+    let destino = destino_de(&cfg)?;
+    let dir_datos = destino.join(".icopia");
+    let _cerrojo = match cerrojo::intentar(&dir_datos)? {
+        Some(c) => c,
+        None => {
+            println!("Esperando a que termine la copia en curso…");
+            cerrojo::esperar(&dir_datos)?
+        }
+    };
+    let registro = Mutex::new(abrir_registro(&destino)?);
+    let sesion = match (opcion(args, "--sesion"), args.iter().any(|a| a == "--ultima")) {
+        (Some(s), _) => s.to_string(),
+        (None, true) => registro.lock().unwrap().ultima_sesion_borrado()?.context("No hay ninguna liberación que restaurar")?,
+        (None, false) => bail!("Uso: icopia restaurar --ultima | --sesion ID"),
+    };
+    let ids = registro.lock().unwrap().ids_de_sesion(&sesion)?;
+    if ids.is_empty() {
+        println!("La liberación {sesion} no tiene nada borrado que restaurar.");
+        return Ok(());
+    }
+    println!("Restaurar {} elementos de la liberación {sesion} (vuelven de \"Eliminado recientemente\" a la fototeca).", ids.len());
+    if preguntar("Escribe RESTAURAR para confirmar: ")? != "RESTAURAR" {
+        println!("Cancelado.");
+        return Ok(());
+    }
+    let mut puente = abrir_puente(&cfg)?;
+    let r = liberar::restaurar(&destino, &registro, &mut puente, &ids)?;
+    println!("Restaurados: {}", r.restaurados.len());
+    if !r.fallidos.is_empty() {
+        println!("No se pudieron restaurar {}:", r.fallidos.len());
+        for (id, e) in r.fallidos.iter().take(10) {
+            println!("  - {id}: {e}");
+        }
+    }
+    Ok(())
+}
+
 fn cmd_liberar(args: &[String]) -> Result<()> {
     let cfg = Config::cargar()?;
     let destino = destino_de(&cfg)?;
-    let dias: u32 = match opcion(args, "--dias") {
-        Some(d) => d.parse().context("--dias debe ser un número")?,
-        None => cfg.mantener_dias,
+    let criterio = match (opcion(args, "--anios"), opcion(args, "--dias")) {
+        (Some(a), _) => Criterio::Anios(a.split(',').map(|x| x.trim().parse().context("--anios: años separados por comas")).collect::<Result<_>>()?),
+        (None, Some(d)) => Criterio::ConservarDias(d.parse().context("--dias debe ser un número")?),
+        (None, None) => Criterio::ConservarDias(cfg.mantener_dias),
     };
     let dir_datos = destino.join(".icopia");
     let _cerrojo = match cerrojo::intentar(&dir_datos)? {
@@ -300,7 +346,7 @@ fn cmd_liberar(args: &[String]) -> Result<()> {
     };
     let registro = Mutex::new(abrir_registro(&destino)?);
     // El avance queda en el registro para que la bandeja lo muestre; un error lo deja como fallido.
-    let r = liberar_con_registro(&cfg, &destino, &registro, dias);
+    let r = liberar_con_registro(&cfg, &destino, &registro, &criterio);
     if let Err(e) = &r {
         progreso_liberar::marcar_fallido(&registro, &format!("{e:#}"));
     }
@@ -327,7 +373,8 @@ fn preguntar_con_latido(texto: &str, registro: &Mutex<Registro>) -> Result<Strin
     })
 }
 
-fn liberar_con_registro(cfg: &Config, destino: &Path, registro: &Mutex<Registro>, dias: u32) -> Result<()> {
+fn liberar_con_registro(cfg: &Config, destino: &Path, registro: &Mutex<Registro>, criterio: &Criterio) -> Result<()> {
+    let dias = criterio.dias();
     let dir_datos = destino.join(".icopia");
     let previsto = registro.lock().unwrap().assets_ultimo_listado()?.unwrap_or(0);
     let mut seg = Seguimiento::empezar(registro, dias);
@@ -348,7 +395,7 @@ fn liberar_con_registro(cfg: &Config, destino: &Path, registro: &Mutex<Registro>
         Listado::Interrumpido(..) => bail!("El listado de iCloud no terminó; no se borra nada."),
     }
     println!("Re-verificando en disco cada archivo antes de proponer nada…");
-    let plan = liberar::preparar(destino, registro, dias, motor::ahora(), &|h, t| {
+    let plan = liberar::preparar_criterio(destino, registro, criterio, motor::ahora(), &|h, t| {
         if h % 100 == 0 || h == t {
             eprint!("\r  {h}/{t}");
         }
@@ -361,6 +408,9 @@ fn liberar_con_registro(cfg: &Config, destino: &Path, registro: &Mutex<Registro>
     }
     if plan.atipicos > 0 {
         println!("De ellos, {} con estructura atípica (confirmadas por doble descarga)", plan.atipicos);
+    }
+    if let Some(a) = criterio.anios() {
+        println!("Años elegidos: {}", a.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", "));
     }
     println!("Se conservan en iCloud los últimos {dias} días y todo lo de la Fototeca Compartida.");
     if plan.no_verificados > 0 {
@@ -400,7 +450,8 @@ fn liberar_con_registro(cfg: &Config, destino: &Path, registro: &Mutex<Registro>
             println!("  - {id}: {e}");
         }
     }
-    println!("Registro de lo borrado: {}", dir_datos.join("borrados.csv").display());
+    println!("Registro de lo borrado: {} (liberación {})", dir_datos.join("borrados.csv").display(), r.sesion);
+    println!("Para deshacerla: icopia restaurar --sesion {}", r.sesion);
     println!("Para liberar el espacio ya: iPhone → Fotos → Eliminado recientemente → Eliminar todo.");
     Ok(())
 }

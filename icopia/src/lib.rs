@@ -2,6 +2,7 @@
 pub mod bitacora;
 pub mod cerrojo;
 pub mod config;
+pub mod criterio;
 pub mod descarga;
 pub mod disco;
 pub mod energia;

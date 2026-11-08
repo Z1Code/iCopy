@@ -9,6 +9,8 @@ Peticiones:
   {"cmd":"codigo_2fa","codigo":"123456"} -> {"ok":true} | {"ok":false,"error":"codigo_incorrecto"}
   {"cmd":"listar"}                       -> {"asset":{...}}* {"aviso":"..."}* {"ok":true,"total":N,"omitidos":M}
   {"cmd":"borrar","ids":[...]}           -> {"ok":true,"borrados":[...],"fallidos":[{"id":..,"error":..}]}
+  {"cmd":"restaurar","ids":[...]}        -> {"ok":true,"restaurados":[...],"fallidos":[{"id":..,"error":..}]}
+     (saca de "Eliminado recientemente" de la biblioteca personal; los ids son los de listar)
   {"cmd":"refrescar","ids":[...]}        -> {"asset":{...}}* {"ok":true,"total":N,"faltan":[...]}
      (enlaces nuevos para ids del último listado; "faltan": no listados, borrados o sin original)
 Errores: {"ok":false,"error":"sesion_caducada"|"credenciales"|"otro","detalle":"..."}
@@ -150,6 +152,16 @@ def asset_a_json(asset: Any, biblioteca: str) -> Optional[Dict[str, Any]]:
 
 def borrar_en_icloud(lib: Any, asset: Any) -> Optional[str]:
     """Manda el asset a 'Eliminado recientemente'. Devuelve None si fue bien o un código de error."""
+    return marcar_borrado(lib, asset, 1)
+
+
+def restaurar_en_icloud(lib: Any, asset: Any) -> Optional[str]:
+    """Saca el asset de 'Eliminado recientemente' (isDeleted = 0). None si fue bien o un código de error."""
+    return marcar_borrado(lib, asset, 0)
+
+
+def marcar_borrado(lib: Any, asset: Any, valor: int) -> Optional[str]:
+    """records/modify del CPLAsset con isDeleted = valor (necesita su recordChangeTag actual)."""
     url = f"{lib.service_endpoint}/records/modify?{urllib.parse.urlencode(lib.params)}"
     datos = json.dumps({
         "atomic": True,
@@ -157,7 +169,7 @@ def borrar_en_icloud(lib: Any, asset: Any) -> Optional[str]:
         "operations": [{
             "operationType": "update",
             "record": {
-                "fields": {"isDeleted": {"value": 1}},
+                "fields": {"isDeleted": {"value": valor}},
                 "recordChangeTag": asset._asset_record["recordChangeTag"],
                 "recordName": asset._asset_record["recordName"],
                 "recordType": "CPLAsset",
@@ -232,16 +244,21 @@ def es_error_de_sesion(e: Exception) -> bool:
 class Puente:
     def __init__(self, apple_id: str, cookies: str,
                  fabrica: Optional[Callable[[Optional[str]], Any]] = None,
-                 borrador: Optional[Callable[[Any, Any], Optional[str]]] = None) -> None:
+                 borrador: Optional[Callable[[Any, Any], Optional[str]]] = None,
+                 restaurador: Optional[Callable[[Any, Any], Optional[str]]] = None,
+                 dominio: str = "com") -> None:
         self.apple_id = apple_id
         self.cookies = cookies
+        self.dominio = dominio
         self.api: Any = None
         self.cache: Dict[str, Tuple[str, Any, Any]] = {}
         self._fabrica = fabrica or self._fabrica_real
         self._borrador = borrador or borrar_en_icloud
+        self._restaurador = restaurador or restaurar_en_icloud
 
     def _fabrica_real(self, password: Optional[str]) -> Any:
-        return PyiCloudService("com", self.apple_id, lambda: password, cookie_directory=self.cookies)
+        # "com" (todo el mundo) o "cn" (iCloud de China continental).
+        return PyiCloudService(self.dominio, self.apple_id, lambda: password, cookie_directory=self.cookies)
 
     def conectar(self, password: Optional[str] = None) -> Any:
         try:
@@ -293,6 +310,8 @@ class Puente:
             self.listar()
         elif cmd == "borrar":
             self.borrar(list(p.get("ids", [])))
+        elif cmd == "restaurar":
+            self.restaurar([str(i) for i in p.get("ids", [])])
         elif cmd == "refrescar":
             self.refrescar([str(i) for i in p.get("ids", [])])
         else:
@@ -394,21 +413,54 @@ class Puente:
             if biblioteca != BIBLIOTECA_PERSONAL:
                 fallidos.append({"id": i, "error": "biblioteca_compartida"})
                 continue
-            try:
-                error = self._borrador(lib, asset)
-            except Exception as e:  # noqa: BLE001 - nada debe perder lo ya borrado
-                if isinstance(e, SesionCaducada) or (
-                        isinstance(e, PyiCloudAPIResponseException) and es_error_de_sesion(e)):
-                    sesion_caducada = True
-                    error = "sesion_caducada"
-                else:
-                    logging.exception("fallo borrando %s", i)
-                    error = f"desconocido: {type(e).__name__}: {e}"
+            error = _aplicar(self._borrador, lib, asset)
+            sesion_caducada = error == "sesion_caducada"
             if error:
                 fallidos.append({"id": i, "error": error})
             else:
                 borrados.append(i)
         responder({"ok": True, "borrados": borrados, "fallidos": fallidos})
+
+    def papelera(self, lib: Any) -> Any:
+        """Lo que hay en 'Eliminado recientemente' de esa biblioteca."""
+        return lib.recently_deleted
+
+    def restaurar(self, ids: List[str]) -> None:
+        """Busca los ids en 'Eliminado recientemente' de la biblioteca personal (ahí traen su
+        recordChangeTag actual) y los restaura. Responde siempre con lo hecho hasta el momento."""
+        pendientes = dict.fromkeys(ids)
+        restaurados: List[str] = []
+        fallidos: List[Dict[str, str]] = []
+        lib = next(l for n, l in self.bibliotecas() if n == BIBLIOTECA_PERSONAL)
+        sesion_caducada = False
+        for asset in self.papelera(lib):
+            if not pendientes or sesion_caducada:
+                break
+            i = asset.id
+            if i not in pendientes:
+                continue
+            del pendientes[i]
+            error = _aplicar(self._restaurador, lib, asset)
+            sesion_caducada = error == "sesion_caducada"
+            if error:
+                fallidos.append({"id": i, "error": error})
+            else:
+                restaurados.append(i)
+        motivo = "sesion_caducada" if sesion_caducada else "no_en_eliminado_recientemente"
+        fallidos += [{"id": i, "error": motivo} for i in pendientes]
+        responder({"ok": True, "restaurados": restaurados, "fallidos": fallidos})
+
+
+def _aplicar(funcion: Callable[[Any, Any], Optional[str]], lib: Any, asset: Any) -> Optional[str]:
+    """Borra o restaura un asset; una excepción se convierte en código de error (nada debe perder lo ya hecho)."""
+    try:
+        return funcion(lib, asset)
+    except Exception as e:  # noqa: BLE001
+        if isinstance(e, SesionCaducada) or (
+                isinstance(e, PyiCloudAPIResponseException) and es_error_de_sesion(e)):
+            return "sesion_caducada"
+        logging.exception("fallo con %s", getattr(asset, "id", "?"))
+        return f"desconocido: {type(e).__name__}: {e}"
 
 
 def main(argv: Optional[List[str]] = None) -> None:
@@ -416,12 +468,13 @@ def main(argv: Optional[List[str]] = None) -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--cookies", required=True)
     ap.add_argument("--apple-id", required=True)
+    ap.add_argument("--dominio", choices=["com", "cn"], default="com")
     args = ap.parse_args(argv)
     _salida = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", newline="\n")
     sys.stdout = sys.stderr  # nada de la librería puede ensuciar el protocolo
     logging.basicConfig(stream=sys.stderr, level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
-    puente = Puente(args.apple_id, args.cookies)
+    puente = Puente(args.apple_id, args.cookies, dominio=args.dominio)
     for linea in io.TextIOWrapper(sys.stdin.buffer, encoding="utf-8"):
         linea = linea.strip()
         if not linea:

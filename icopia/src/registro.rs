@@ -1,8 +1,10 @@
 //! Registro persistente (SQLite en <destino>\.icopia\registro.db).
+use crate::criterio::FilaInventario;
 use crate::layout;
 use crate::modelo::{AssetIcloud, TipoParte, BIBLIOTECA_PERSONAL};
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Duration;
 
@@ -145,6 +147,9 @@ ON CONFLICT(asset_id, tipo) DO UPDATE SET
   extension = excluded.extension
 "#;
 
+/// Filtro por años de captura: ?4 es una lista JSON de años, o NULL para todos.
+const EN_ANIOS: &str = "(?4 IS NULL OR CAST(substr(a.fecha, 1, 4) AS INTEGER) IN (SELECT value FROM json_each(?4)))";
+
 const EN_ULTIMA_LISTA: &str = "a.visto_en_lista = CAST((SELECT valor FROM meta WHERE clave = 'marca_lista') AS INTEGER)";
 
 const COLUMNAS_TRABAJO: &str =
@@ -222,6 +227,8 @@ impl Registro {
         asegurar_columna(&con, "assets", "liberable", "INTEGER NOT NULL DEFAULT 1")?;
         asegurar_columna(&con, "assets", "agregado_unix", "INTEGER")?;
         asegurar_columna(&con, "partes", "estructura_atipica", "INTEGER NOT NULL DEFAULT 0")?;
+        // Liberación (borrado en iCloud) en la que se borró: para poder restaurarla entera.
+        asegurar_columna(&con, "assets", "sesion_borrado", "TEXT")?;
         Ok(Registro { con })
     }
 
@@ -424,17 +431,23 @@ impl Registro {
     /// Solo los marcados como liberables. Cuenta aparte los que no están verificados del todo
     /// y los que tienen datos que icopia no copia.
     pub fn candidatos_liberar(&self, marca: i64, limite_unix: i64) -> Result<CandidatosLiberar> {
-        let mut st = self.con.prepare(
+        self.candidatos_liberar_en(marca, limite_unix, None)
+    }
+
+    /// Como `candidatos_liberar`, pero solo de estos años de captura (si se dan).
+    pub fn candidatos_liberar_en(&self, marca: i64, limite_unix: i64, anios: Option<&BTreeSet<i32>>) -> Result<CandidatosLiberar> {
+        let anios = anios.map(|a| serde_json::to_string(a).expect("años en JSON"));
+        let mut st = self.con.prepare(&format!(
             "SELECT a.id, a.nombre_base, a.fecha FROM assets a
              WHERE a.biblioteca = ?3 AND a.borrado_icloud IS NULL AND a.visto_en_lista = ?1 AND MAX(a.fecha_unix, COALESCE(a.agregado_unix, a.fecha_unix)) < ?2
-               AND a.liberable = 1
+               AND a.liberable = 1 AND {EN_ANIOS}
                AND EXISTS(SELECT 1 FROM partes p WHERE p.asset_id = a.id)
                AND NOT EXISTS(SELECT 1 FROM partes p WHERE p.asset_id = a.id
                               AND (p.estado <> 'verificado' OR p.sha256 IS NULL OR p.ruta IS NULL))
              ORDER BY a.fecha_unix",
-        )?;
+        ))?;
         let base: Vec<(String, String, String)> = st
-            .query_map(params![marca, limite_unix, BIBLIOTECA_PERSONAL], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .query_map(params![marca, limite_unix, BIBLIOTECA_PERSONAL, anios], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
             .collect::<rusqlite::Result<_>>()?;
         let mut st_p = self.con.prepare(
             "SELECT asset_id, tipo, ruta, tamano, extension, sha256, estructura_atipica FROM partes WHERE asset_id = ?1 ORDER BY tipo",
@@ -457,27 +470,90 @@ impl Registro {
             candidatos.push(Candidato { asset_id: id, nombre_base, fecha, partes });
         }
         let no_listos: i64 = self.con.query_row(
-            "SELECT COUNT(*) FROM assets a
-             WHERE a.biblioteca = ?3 AND a.borrado_icloud IS NULL AND a.visto_en_lista = ?1 AND MAX(a.fecha_unix, COALESCE(a.agregado_unix, a.fecha_unix)) < ?2
-               AND a.liberable = 1
-               AND (NOT EXISTS(SELECT 1 FROM partes p WHERE p.asset_id = a.id)
-                    OR EXISTS(SELECT 1 FROM partes p WHERE p.asset_id = a.id AND p.estado <> 'verificado'))",
-            params![marca, limite_unix, BIBLIOTECA_PERSONAL],
+            &format!(
+                "SELECT COUNT(*) FROM assets a
+                 WHERE a.biblioteca = ?3 AND a.borrado_icloud IS NULL AND a.visto_en_lista = ?1 AND MAX(a.fecha_unix, COALESCE(a.agregado_unix, a.fecha_unix)) < ?2
+                   AND a.liberable = 1 AND {EN_ANIOS}
+                   AND (NOT EXISTS(SELECT 1 FROM partes p WHERE p.asset_id = a.id)
+                        OR EXISTS(SELECT 1 FROM partes p WHERE p.asset_id = a.id AND p.estado <> 'verificado'))"
+            ),
+            params![marca, limite_unix, BIBLIOTECA_PERSONAL, anios],
             |r| r.get(0),
         )?;
         let no_liberables: i64 = self.con.query_row(
-            "SELECT COUNT(*) FROM assets a
-             WHERE a.biblioteca = ?3 AND a.borrado_icloud IS NULL AND a.visto_en_lista = ?1 AND MAX(a.fecha_unix, COALESCE(a.agregado_unix, a.fecha_unix)) < ?2
-               AND a.liberable = 0",
-            params![marca, limite_unix, BIBLIOTECA_PERSONAL],
+            &format!(
+                "SELECT COUNT(*) FROM assets a
+                 WHERE a.biblioteca = ?3 AND a.borrado_icloud IS NULL AND a.visto_en_lista = ?1 AND MAX(a.fecha_unix, COALESCE(a.agregado_unix, a.fecha_unix)) < ?2
+                   AND a.liberable = 0 AND {EN_ANIOS}"
+            ),
+            params![marca, limite_unix, BIBLIOTECA_PERSONAL, anios],
             |r| r.get(0),
         )?;
         Ok(CandidatosLiberar { candidatos, no_verificados: no_listos as u64, no_liberables: no_liberables as u64 })
     }
 
     pub fn marcar_borrado(&mut self, asset_id: &str, cuando: &str) -> Result<()> {
-        self.con.execute("UPDATE assets SET borrado_icloud = ?2 WHERE id = ?1", params![asset_id, cuando])?;
+        self.marcar_borrado_en(asset_id, cuando, None)
+    }
+
+    /// Borrado en iCloud durante la liberación `sesion` (para poder restaurarla).
+    pub fn marcar_borrado_en(&mut self, asset_id: &str, cuando: &str, sesion: Option<&str>) -> Result<()> {
+        self.con.execute("UPDATE assets SET borrado_icloud = ?2, sesion_borrado = ?3 WHERE id = ?1", params![asset_id, cuando, sesion])?;
         Ok(())
+    }
+
+    /// Vuelve a estar en iCloud (restaurado de "Eliminado recientemente").
+    pub fn marcar_restaurado(&mut self, asset_id: &str) -> Result<()> {
+        self.con.execute("UPDATE assets SET borrado_icloud = NULL, sesion_borrado = NULL WHERE id = ?1", params![asset_id])?;
+        Ok(())
+    }
+
+    /// La última liberación con algo aún borrado (por la hora del último borrado).
+    pub fn ultima_sesion_borrado(&self) -> Result<Option<String>> {
+        Ok(self
+            .con
+            .query_row(
+                "SELECT sesion_borrado FROM assets WHERE sesion_borrado IS NOT NULL AND borrado_icloud IS NOT NULL
+                 ORDER BY borrado_icloud DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Ids borrados en iCloud durante la liberación `sesion` (y no restaurados).
+    pub fn ids_de_sesion(&self, sesion: &str) -> Result<Vec<String>> {
+        let mut st = self.con.prepare("SELECT id FROM assets WHERE sesion_borrado = ?1 AND borrado_icloud IS NOT NULL ORDER BY fecha_unix")?;
+        let filas = st.query_map(params![sesion], |r| r.get(0))?;
+        Ok(filas.collect::<rusqlite::Result<Vec<String>>>()?)
+    }
+
+    /// Todo lo del último listado que sigue en iCloud, para calcular selecciones al instante.
+    pub fn inventario_liberar(&self) -> Result<Vec<FilaInventario>> {
+        let Some(marca) = self.marca_lista()? else { return Ok(vec![]) };
+        let mut st = self.con.prepare(
+            "SELECT a.fecha, a.fecha_unix, a.agregado_unix, a.biblioteca = ?2, a.liberable,
+                    EXISTS(SELECT 1 FROM partes p WHERE p.asset_id = a.id)
+                      AND NOT EXISTS(SELECT 1 FROM partes p WHERE p.asset_id = a.id
+                                     AND (p.estado <> 'verificado' OR p.sha256 IS NULL OR p.ruta IS NULL)),
+                    COALESCE((SELECT SUM(tamano) FROM partes p WHERE p.asset_id = a.id), 0),
+                    EXISTS(SELECT 1 FROM partes p WHERE p.asset_id = a.id AND p.estructura_atipica = 1)
+             FROM assets a WHERE a.borrado_icloud IS NULL AND a.visto_en_lista = ?1",
+        )?;
+        let filas = st.query_map(params![marca, BIBLIOTECA_PERSONAL], |r| {
+            let fecha: String = r.get(0)?;
+            Ok(FilaInventario {
+                anio: fecha.get(..4).and_then(|a| a.parse().ok()).unwrap_or(0),
+                fecha_unix: r.get(1)?,
+                agregado_unix: r.get(2)?,
+                personal: r.get(3)?,
+                liberable: r.get(4)?,
+                completo: r.get(5)?,
+                bytes: r.get::<_, i64>(6)? as u64,
+                atipico: r.get(7)?,
+            })
+        })?;
+        Ok(filas.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn resumen(&self) -> Result<Resumen> {
@@ -817,6 +893,43 @@ mod tests {
         assert_eq!(c.no_liberables, 0);
         r.marcar_borrado("A1", "2026-11-07T10:00:00-05:00").unwrap();
         assert!(r.candidatos_liberar(200, limite).unwrap().candidatos.is_empty());
+    }
+
+    #[test]
+    fn candidatos_por_anios_e_inventario_coinciden_con_la_seleccion() {
+        use crate::criterio::{seleccionar, Criterio};
+        let mut r = Registro::en_memoria().unwrap();
+        listar(&mut r, &[
+            asset("A1", "PrimarySync", "2023-05-01T10:00:00-04:00", &[(Original, 5)]),
+            asset("A2", "PrimarySync", "2024-05-01T10:00:00-04:00", &[(Original, 7), (Live, 1)]),
+            asset("A3", "PrimarySync", "2024-12-31T23:30:00-05:00", &[(Original, 2)]),
+            asset("C1", "SharedSync-1", "2024-05-01T10:00:00-04:00", &[(Original, 1)]),
+            asset("A4", "PrimarySync", "2024-06-01T10:00:00-04:00", &[(Original, 1)]),
+        ], 100);
+        for (id, t) in [("A1", Original), ("A2", Original), ("A2", Live), ("A3", Original), ("C1", Original)] {
+            dar_por_copiado(&mut r, id, t);
+        }
+        let ahora = chrono::DateTime::parse_from_rfc3339("2026-11-07T00:00:00Z").unwrap().timestamp();
+        let c = Criterio::Anios([2024].into_iter().collect());
+        let cand = r.candidatos_liberar_en(100, c.limite(ahora), c.anios()).unwrap();
+        assert_eq!(cand.candidatos.iter().map(|c| c.asset_id.as_str()).collect::<Vec<_>>(), vec!["A2", "A3"], "año local de captura");
+        assert_eq!(cand.no_verificados, 1); // A4
+        let inv = r.inventario_liberar().unwrap();
+        assert_eq!(inv.len(), 5);
+        let s = seleccionar(&inv, &c, ahora);
+        assert_eq!((s.elementos, s.bytes, s.no_copiados, s.compartida), (2, 10, 1, 1));
+        let todo = Criterio::ConservarDias(30);
+        let cand = r.candidatos_liberar_en(100, todo.limite(ahora), todo.anios()).unwrap();
+        assert_eq!(cand.candidatos.len() as u64, seleccionar(&inv, &todo, ahora).elementos);
+        // Sesiones de borrado: la última, sus ids y restaurar.
+        r.marcar_borrado_en("A1", "2026-11-01T10:00:00-05:00", Some("s1")).unwrap();
+        r.marcar_borrado_en("A2", "2026-11-02T10:00:00-05:00", Some("s2")).unwrap();
+        r.marcar_borrado_en("A3", "2026-11-02T10:00:01-05:00", Some("s2")).unwrap();
+        assert_eq!(r.ultima_sesion_borrado().unwrap().as_deref(), Some("s2"));
+        assert_eq!(r.ids_de_sesion("s2").unwrap(), vec!["A2", "A3"]);
+        r.marcar_restaurado("A2").unwrap();
+        assert_eq!(r.ids_de_sesion("s2").unwrap(), vec!["A3"]);
+        assert_eq!(r.inventario_liberar().unwrap().len(), 3, "lo restaurado vuelve al inventario");
     }
 
     #[test]

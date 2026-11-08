@@ -38,6 +38,8 @@ pub trait FuenteIcloud: Send {
     fn refrescar(&mut self, ids: &[String], en_asset: &mut dyn FnMut(AssetIcloud) -> bool) -> Result<Vec<String>, ErrorFuente>;
     /// Borra (manda a "Eliminado recientemente") los ids del último listado.
     fn borrar(&mut self, ids: &[String]) -> Result<ResultadoBorrado, ErrorFuente>;
+    /// Saca estos ids de "Eliminado recientemente" (en `borrados` van los restaurados).
+    fn restaurar(&mut self, ids: &[String]) -> Result<ResultadoBorrado, ErrorFuente>;
 }
 
 /// Fuente en memoria para pruebas.
@@ -55,6 +57,8 @@ pub struct FuenteFalsa {
     pub faltan: Vec<String>,
     /// Ids pedidos en cada llamada a `refrescar`.
     pub refrescos: Vec<Vec<String>>,
+    /// "Eliminado recientemente": lo borrado, que se puede restaurar.
+    pub papelera: Vec<AssetIcloud>,
 }
 
 /// Cambia el parámetro `e=` (caducidad) de un enlace.
@@ -124,8 +128,27 @@ impl FuenteIcloud for FuenteFalsa {
                 r.fallidos.push((id.clone(), "reintentar".into()));
             } else {
                 self.borrados.push(id.clone());
-                self.assets.retain(|a| &a.id != id);
+                if let Some(i) = self.assets.iter().position(|a| &a.id == id) {
+                    self.papelera.push(self.assets.remove(i));
+                }
                 r.borrados.push(id.clone());
+            }
+        }
+        Ok(r)
+    }
+
+    fn restaurar(&mut self, ids: &[String]) -> Result<ResultadoBorrado, ErrorFuente> {
+        if self.sesion_caducada {
+            return Err(ErrorFuente::SesionCaducada);
+        }
+        let mut r = ResultadoBorrado::default();
+        for id in ids {
+            match self.papelera.iter().position(|a| &a.id == id) {
+                Some(i) => {
+                    self.assets.push(self.papelera.remove(i));
+                    r.borrados.push(id.clone());
+                }
+                None => r.fallidos.push((id.clone(), "no_en_eliminado_recientemente".into())),
             }
         }
         Ok(r)
@@ -164,6 +187,11 @@ mod tests {
         assert_eq!(r.borrados, vec!["A"]);
         assert_eq!(r.fallidos, vec![("B".to_string(), "reintentar".to_string())]);
         assert_eq!(f.assets.len(), 1);
+        let r = f.restaurar(&["A".into(), "B".into()]).unwrap();
+        assert_eq!(r.borrados, vec!["A"]);
+        assert_eq!(r.fallidos, vec![("B".to_string(), "no_en_eliminado_recientemente".to_string())]);
+        assert_eq!(f.assets.len(), 2);
+        assert!(f.papelera.is_empty());
     }
 
     #[test]

@@ -36,6 +36,10 @@ for linea in sys.stdin:
         ids = p["ids"]
         out({"ok": True, "borrados": [i for i in ids if i != "MALO"],
              "fallidos": [{"id": "MALO", "error": "reintentar"}] if "MALO" in ids else []})
+    elif c == "restaurar":
+        ids = p["ids"]
+        out({"ok": True, "restaurados": [i for i in ids if i != "PERDIDO"],
+             "fallidos": [{"id": "PERDIDO", "error": "no_en_eliminado_recientemente"}] if "PERDIDO" in ids else []})
     elif c == "refrescar":
         ids = p["ids"]
         for i in ids:

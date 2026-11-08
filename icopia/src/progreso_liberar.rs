@@ -49,6 +49,15 @@ pub struct ProgresoLiberar {
     pub por_seg: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Borrado en pausa (a petición): sigue vivo, pero no avanza.
+    #[serde(default)]
+    pub en_pausa: bool,
+    /// Terminó porque se canceló (tras el lote en curso).
+    #[serde(default)]
+    pub cancelado: bool,
+    /// Identificador de la liberación (para restaurarla).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sesion: Option<String>,
 }
 
 /// Cómo debe mostrarse ahora un avance guardado.
@@ -77,6 +86,9 @@ impl ProgresoLiberar {
             dias,
             por_seg: None,
             error: None,
+            en_pausa: false,
+            cancelado: false,
+            sesion: None,
         }
     }
 
@@ -221,10 +233,27 @@ impl<'a> Seguimiento<'a> {
         self.p.fallidos = fallidos;
     }
 
-    pub fn terminar(&mut self) {
+    /// Fin del borrado (`cancelado`: se paró a petición antes de acabar).
+    pub fn terminar(&mut self, cancelado: bool) {
         self.p.fase = FaseLiberar::Terminado;
         self.p.por_seg = None;
+        self.p.en_pausa = false;
+        self.p.cancelado = cancelado;
         self.escribir();
+    }
+
+    /// Entra o sale de la pausa (se anota siempre; en pausa conviene repetirlo como latido).
+    pub fn pausa(&mut self, si: bool) {
+        self.p.en_pausa = si;
+        if si {
+            self.p.por_seg = None;
+            self.ritmo.reiniciar();
+        }
+        self.escribir();
+    }
+
+    pub fn sesion(&mut self, sesion: &str) {
+        self.p.sesion = Some(sesion.to_string());
     }
 
     pub fn fallar(&mut self, motivo: &str) {
@@ -349,7 +378,7 @@ mod tests {
         assert_eq!(leer(&reg.lock().unwrap()), None);
         // Tras un final, el siguiente empieza de cero.
         let mut s = Seguimiento::empezar(&reg, 7);
-        s.terminar();
+        s.terminar(false);
         marcar_fallido(&reg, "x");
         assert_eq!(leer(&reg.lock().unwrap()).unwrap().fase, FaseLiberar::Terminado, "un final no se pisa");
         let s = Seguimiento::continuar(&reg, Some(5));

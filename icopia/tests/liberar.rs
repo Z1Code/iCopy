@@ -138,7 +138,7 @@ fn un_fallo_al_anotar_no_detiene_el_borrado_ni_pierde_registros() {
     assert_eq!(plan.listos.len(), 2);
     let r = liberar::ejecutar(e.dir.path(), &e.reg, &mut e.fuente, &plan.listos, &|_, _| {}).unwrap();
     assert_eq!(r.borrados, 2);
-    assert_eq!(r.errores.len(), 2, "{:?}", r.errores);
+    assert_eq!(r.errores.iter().filter(|(id, _)| !id.is_empty()).count(), 2, "{:?}", r.errores);
     let otra = liberar::preparar(e.dir.path(), &e.reg, 30, motor::ahora(), &|_, _| {}).unwrap();
     assert!(otra.listos.is_empty(), "lo borrado queda anotado en el registro");
 }
@@ -177,4 +177,68 @@ fn un_error_de_icloud_deja_el_avance_como_fallido() {
     let p = progreso_liberar::leer(&e.reg.lock().unwrap()).unwrap();
     assert_eq!((p.fase, p.borrados), (FaseLiberar::Fallido, 0));
     assert!(p.error.unwrap().contains("borrando en iCloud"));
+}
+
+#[test]
+fn por_anios_y_restaurar_la_sesion() {
+    use icopia::criterio::Criterio;
+    let mut e = escenario();
+    // V1 y V2 son de 2025; pedir solo 2024 no propone nada.
+    let c = Criterio::Anios([2024].into_iter().collect());
+    assert!(liberar::preparar_criterio(e.dir.path(), &e.reg, &c, motor::ahora(), &|_, _| {}).unwrap().listos.is_empty());
+    let c = Criterio::Anios([2025].into_iter().collect());
+    let plan = liberar::preparar_criterio(e.dir.path(), &e.reg, &c, motor::ahora(), &|_, _| {}).unwrap();
+    assert_eq!(plan.listos.len(), 2);
+    let lista = liberar::escribir_plan_csv(e.dir.path(), &plan).unwrap();
+    assert_eq!(std::fs::read_to_string(lista).unwrap().lines().count(), 3);
+    // borrados.csv de una versión anterior: se le añade la columna de sesión.
+    std::fs::write(e.dir.path().join(r".icopia\borrados.csv"), "fecha_borrado,asset_id,nombre,fecha_captura,archivos\n\"x\",\"OLD\",\"n\",\"f\",\"a\"\n").unwrap();
+    let r = liberar::ejecutar(e.dir.path(), &e.reg, &mut e.fuente, &plan.listos, &|_, _| {}).unwrap();
+    assert_eq!((r.borrados, r.bytes), (2, plan.bytes));
+    let csv = std::fs::read_to_string(e.dir.path().join(r".icopia\borrados.csv")).unwrap();
+    let lineas: Vec<&str> = csv.lines().collect();
+    assert_eq!(lineas[0], "fecha_borrado,asset_id,nombre,fecha_captura,archivos,sesion");
+    assert!(lineas[1].contains("OLD"), "las filas antiguas se conservan");
+    assert!(lineas[2].ends_with(&format!("\"{}\"", r.sesion)), "{}", lineas[2]);
+    assert_eq!(e.reg.lock().unwrap().ultima_sesion_borrado().unwrap(), Some(r.sesion.clone()));
+    // Restaurar la liberación: vuelven a iCloud y al registro; se pueden volver a liberar.
+    let rr = liberar::restaurar_sesion(e.dir.path(), &e.reg, &mut e.fuente, &r.sesion).unwrap();
+    assert_eq!(rr.restaurados.len(), 2);
+    assert!(rr.fallidos.is_empty());
+    assert!(e.fuente.papelera.is_empty());
+    assert!(e.reg.lock().unwrap().ids_de_sesion(&r.sesion).unwrap().is_empty());
+    assert!(std::fs::read_to_string(e.dir.path().join(r".icopia\restaurados.csv")).unwrap().contains("\"V1\""));
+    assert_eq!(liberar::preparar_criterio(e.dir.path(), &e.reg, &c, motor::ahora(), &|_, _| {}).unwrap().listos.len(), 2);
+    // Restaurar algo que no está en "Eliminado recientemente" falla sin tocar nada.
+    let rr = liberar::restaurar(e.dir.path(), &e.reg, &mut e.fuente, &["V1".into()]).unwrap();
+    assert_eq!(rr.fallidos.len(), 1);
+}
+
+#[test]
+fn cancelar_y_pausar_entre_lotes() {
+    use icopia::liberar::ControlBorrado;
+    use icopia::progreso_liberar::{self, FaseLiberar};
+    use std::sync::atomic::Ordering;
+    let mut e = escenario();
+    let plan = liberar::preparar(e.dir.path(), &e.reg, 30, motor::ahora(), &|_, _| {}).unwrap();
+    let control = ControlBorrado::default();
+    control.cancelar.store(true, Ordering::SeqCst);
+    let r = liberar::ejecutar_con(e.dir.path(), &e.reg, &mut e.fuente, &plan.listos, &|_, _| {}, &control).unwrap();
+    assert!(r.cancelado);
+    assert_eq!(r.borrados, 0, "se cancela antes del primer lote");
+    let p = progreso_liberar::leer(&e.reg.lock().unwrap()).unwrap();
+    assert_eq!((p.fase, p.cancelado), (FaseLiberar::Terminado, true));
+    // En pausa espera; al reanudar, borra todo.
+    let control = std::sync::Arc::new(ControlBorrado::default());
+    control.pausa.store(true, Ordering::SeqCst);
+    let c2 = control.clone();
+    let reanudar = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        c2.pausa.store(false, Ordering::SeqCst);
+    });
+    let inicio = std::time::Instant::now();
+    let r = liberar::ejecutar_con(e.dir.path(), &e.reg, &mut e.fuente, &plan.listos, &|_, _| {}, &control).unwrap();
+    reanudar.join().unwrap();
+    assert!(inicio.elapsed() >= std::time::Duration::from_millis(350));
+    assert_eq!((r.borrados, r.cancelado), (2, false));
 }

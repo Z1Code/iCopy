@@ -37,6 +37,14 @@ fn borrar_reporta_fallidos() {
 }
 
 #[test]
+fn restaurar_reporta_restaurados_y_fallidos() {
+    let mut p = falso(&[]);
+    let r = p.restaurar(&["A1".into(), "PERDIDO".into()]).unwrap();
+    assert_eq!(r.borrados, vec!["A1"]);
+    assert_eq!(r.fallidos, vec![("PERDIDO".to_string(), "no_en_eliminado_recientemente".to_string())]);
+}
+
+#[test]
 fn refrescar_emite_assets_y_faltan() {
     let mut p = falso(&[]);
     let mut vistos = vec![];

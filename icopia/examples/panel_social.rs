@@ -45,7 +45,7 @@ fn main() {
         fallidos: 0,
         dias: 30,
         por_seg: Some((11_029 - 2_350) as f64 / (14.0 * 60.0)),
-        error: None,
+        ..ProgresoLiberar::nuevo(30, ahora)
     };
     let (estado, liberar) = match modo.as_str() {
         // Mientras se borra, la copia está en pausa (y al acabar, al día).

@@ -521,3 +521,57 @@ def test_refrescar_sesion_caducada_es_error_de_sesion(salida, monkeypatch):
     with pytest.raises(PyiCloudAPIResponseException) as e:
         p.manejar({"cmd": "refrescar", "ids": ["M0"]})
     assert pi.es_error_de_sesion(e.value)
+
+
+class ApiConLibs(ApiFalsa):
+    def __init__(self, libs):
+        super().__init__()
+        self.photos = type("Fotos", (), {"private_libraries": libs})()
+
+
+def _puente_con_papelera(papelera, restaurador):
+    p = pi.Puente("yo@x.com", "c", fabrica=lambda _pw: ApiConLibs({"PrimarySync": "lib"}), restaurador=restaurador)
+    p.papelera = lambda lib: iter(papelera)
+    return p
+
+
+def test_restaurar_busca_en_eliminado_recientemente(salida):
+    hechos = []
+    papelera = [AssetFalso(id=i) for i in ["X1", "A1", "A2", "A3"]]
+    p = _puente_con_papelera(papelera, lambda lib, a: hechos.append((lib, a.id)) or ("CONFLICT" if a.id == "A2" else None))
+    p.manejar({"cmd": "restaurar", "ids": ["A1", "A2", "ZZ"]})
+    assert hechos == [("lib", "A1"), ("lib", "A2")], "solo los pedidos, en la biblioteca personal"
+    assert lineas(salida) == [{"ok": True, "restaurados": ["A1"],
+                               "fallidos": [{"id": "A2", "error": "CONFLICT"},
+                                            {"id": "ZZ", "error": "no_en_eliminado_recientemente"}]}]
+
+
+def test_restaurar_sesion_caducada_en_medio(salida):
+    from pyicloud_ipd.exceptions import PyiCloudAPIResponseException
+
+    def restaurador(lib, a):
+        if a.id == "A2":
+            raise PyiCloudAPIResponseException("Authentication required", "401")
+
+    p = _puente_con_papelera([AssetFalso(id=i) for i in ["A1", "A2", "A3"]], restaurador)
+    p.manejar({"cmd": "restaurar", "ids": ["A1", "A2", "A3"]})
+    assert lineas(salida) == [{"ok": True, "restaurados": ["A1"],
+                               "fallidos": [{"id": "A2", "error": "sesion_caducada"},
+                                            {"id": "A3", "error": "sesion_caducada"}]}]
+
+
+def test_restaurar_en_icloud_pone_is_deleted_a_cero():
+    lib = LibFalsa(Respuesta({"records": [{"recordName": "A1", "fields": {"isDeleted": {"value": 0}}}]}))
+    assert pi.restaurar_en_icloud(lib, AssetFalso(id="A1")) is None
+    op = lib.session.envios[0]["operations"][0]
+    assert op["record"]["fields"] == {"isDeleted": {"value": 0}}
+    assert op["record"]["recordChangeTag"] == "tag1"
+    assert pi.restaurar_en_icloud(LibFalsa(Respuesta({"records": []})), AssetFalso(id="A1")) == "respuesta_desconocida"
+
+
+def test_dominio_china_se_pasa_a_pyicloud(monkeypatch):
+    vistos = []
+    monkeypatch.setattr(pi, "PyiCloudService", lambda dominio, *a, **k: vistos.append(dominio) or ApiFalsa())
+    pi.Puente("yo@x.com", "c", dominio="cn").conectar()
+    pi.Puente("yo@x.com", "c").conectar()
+    assert vistos == ["cn", "com"]

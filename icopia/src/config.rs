@@ -10,11 +10,30 @@ pub struct Config {
     pub mantener_dias: u32,
     pub concurrencia: usize,
     pub intervalo_horas: u64,
+    /// Servidores de iCloud: `com` (todo el mundo) o `cn` (cuentas de China continental).
+    pub dominio: Dominio,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Dominio {
+    #[default]
+    Com,
+    Cn,
+}
+
+impl Dominio {
+    pub fn como_str(self) -> &'static str {
+        match self {
+            Dominio::Com => "com",
+            Dominio::Cn => "cn",
+        }
+    }
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { destino: None, apple_id: None, mantener_dias: 30, concurrencia: 3, intervalo_horas: 4 }
+        Config { destino: None, apple_id: None, mantener_dias: 30, concurrencia: 3, intervalo_horas: 4, dominio: Dominio::Com }
     }
 }
 
@@ -79,6 +98,11 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let ruta = d.path().join("sub").join("config.json");
         let c = Config { destino: Some(PathBuf::from(r"F:\iPhone Fotos")), apple_id: Some("yo@x.com".into()), ..Config::default() };
+        assert_eq!(c.dominio, Dominio::Com);
+        let cn: Config = serde_json::from_str(r#"{"dominio":"cn"}"#).unwrap();
+        assert_eq!((cn.dominio, cn.dominio.como_str()), (Dominio::Cn, "cn"));
+        let viejo: Config = serde_json::from_str(r#"{"mantener_dias":60}"#).unwrap();
+        assert_eq!(viejo.dominio, Dominio::Com, "una configuración anterior usa iCloud normal");
         c.guardar_en(&ruta).unwrap();
         assert_eq!(Config::cargar_de(&ruta).unwrap(), c);
     }

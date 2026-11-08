@@ -44,8 +44,15 @@ fn comprobar(v: &Value) -> Result<(), ErrorFuente> {
 }
 
 impl Puente {
+    /// Con el dominio de iCloud de la configuración (`com`, o `cn` para iCloud China).
     pub fn iniciar(apple_id: &str, dir_sesion: &Path, log: &Path) -> anyhow::Result<Puente> {
-        Self::iniciar_con(comando_puente()?, apple_id, dir_sesion, log)
+        let mut cmd = comando_puente()?;
+        let dominio = crate::config::Config::cargar().map(|c| c.dominio).unwrap_or_default();
+        // Solo si no es el normal: un puente antiguo no conoce la opción.
+        if dominio != crate::config::Dominio::Com {
+            cmd.arg("--dominio").arg(dominio.como_str());
+        }
+        Self::iniciar_con(cmd, apple_id, dir_sesion, log)
     }
 
     pub fn iniciar_con(mut cmd: Command, apple_id: &str, dir_sesion: &Path, log: &Path) -> anyhow::Result<Puente> {
@@ -162,20 +169,32 @@ impl FuenteIcloud for Puente {
         self.enviar(&json!({"cmd": "borrar", "ids": ids}))?;
         let v = self.leer()?;
         comprobar(&v)?;
-        let borrados = v["borrados"]
-            .as_array()
-            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
-            .unwrap_or_default();
-        let fallidos = v["fallidos"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .map(|x| (x["id"].as_str().unwrap_or("").to_string(), x["error"].as_str().unwrap_or("").to_string()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        Ok(ResultadoBorrado { borrados, fallidos })
+        Ok(resultado(&v, "borrados"))
     }
+
+    fn restaurar(&mut self, ids: &[String]) -> Result<ResultadoBorrado, ErrorFuente> {
+        self.enviar(&json!({"cmd": "restaurar", "ids": ids}))?;
+        let v = self.leer()?;
+        comprobar(&v)?;
+        Ok(resultado(&v, "restaurados"))
+    }
+}
+
+/// `{"<hechos>": [...], "fallidos": [{"id", "error"}]}` del puente.
+fn resultado(v: &Value, hechos: &str) -> ResultadoBorrado {
+    let borrados = v[hechos]
+        .as_array()
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let fallidos = v["fallidos"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|x| (x["id"].as_str().unwrap_or("").to_string(), x["error"].as_str().unwrap_or("").to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    ResultadoBorrado { borrados, fallidos }
 }
 
 impl Drop for Puente {

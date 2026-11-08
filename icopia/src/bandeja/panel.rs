@@ -311,7 +311,7 @@ fn pct(p: &ProgresoLiberar) -> u64 {
 /// Sección del panel para un liberar guardado en el registro; `None` si no hay nada que mostrar.
 pub fn vista_liberar(p: &ProgresoLiberar, ahora_unix: i64) -> Option<VistaLiberar> {
     let sit = p.situacion(ahora_unix)?;
-    let eta = p.restante_seg().map(|s| format!(" · {}", duracion(s))).unwrap_or_default();
+    let eta = p.restante_seg().filter(|_| !p.en_pausa).map(|s| format!(" · {}", duracion(s))).unwrap_or_default();
     let v = match sit {
         Situacion::EnCurso => {
             let (subtitulo, fraccion, linea) = match p.fase {
@@ -320,7 +320,11 @@ pub fn vista_liberar(p: &ProgresoLiberar, ahora_unix: i64) -> Option<VistaLibera
                 }
                 FaseLiberar::Listando => ("Consultando iCloud…", None, format!("{} elementos vistos", miles(p.hechos))),
                 _ => (
-                    if p.fase == FaseLiberar::Borrando { "Borrando en iCloud…" } else { "Comprobando archivos en disco…" },
+                    match p.fase {
+                        FaseLiberar::Borrando if p.en_pausa => "En pausa",
+                        FaseLiberar::Borrando => "Borrando en iCloud…",
+                        _ => "Comprobando archivos en disco…",
+                    },
                     p.fraccion().or(Some(0.0)),
                     format!("{} / {} · {} % · {}{eta}", miles(p.hechos), miles(p.total), pct(p), par_bytes_dec(p.bytes_hechos, p.bytes_total)),
                 ),
@@ -339,6 +343,14 @@ pub fn vista_liberar(p: &ProgresoLiberar, ahora_unix: i64) -> Option<VistaLibera
             linea: format!("Listos para borrar: {} elementos · {}", miles(p.total), bytes_dec(p.bytes_total)),
             linea2: "Escribe BORRAR en la ventana de la consola".into(),
             tono: TonoLiberar::Activo,
+        },
+        Situacion::Terminado if p.cancelado => VistaLiberar {
+            titulo: "Liberación cancelada".into(),
+            subtitulo: format!("Cancelada {}", hace(ahora_unix - p.actualizado_unix)),
+            fraccion: p.fraccion(),
+            linea: format!("Liberados {} ({} de {} elementos)", bytes_dec(p.bytes_hechos), miles(p.borrados), miles(p.total)),
+            linea2: "Vacía «Eliminado recientemente» para recuperarlo".into(),
+            tono: TonoLiberar::Hecho,
         },
         Situacion::Terminado => {
             let mut subtitulo = format!("Terminado {}", hace(ahora_unix - p.actualizado_unix));
@@ -721,7 +733,7 @@ mod tests {
             fallidos: 0,
             dias: 30,
             por_seg: Some((total - hechos) as f64 / (14.0 * 60.0)),
-            error: None,
+            ..ProgresoLiberar::nuevo(30, 0)
         }
     }
 
@@ -751,6 +763,14 @@ mod tests {
         assert_eq!((v.titulo.as_str(), v.subtitulo.as_str()), ("No se terminó de liberar espacio", "Se detuvo hace 10 min sin terminar"));
         assert_eq!((v.linea.as_str(), v.tono), ("Borrados 2.350 de 11.029 · 16,1 GB", TonoLiberar::Problema));
         assert_eq!(texto_bandeja_liberar(&p, 1_000_000 + 600), None);
+        // En pausa: sin tiempo restante.
+        let pausa = ProgresoLiberar { en_pausa: true, ..p.clone() };
+        let v = vista_liberar(&pausa, 1_000_005).unwrap();
+        assert_eq!((v.subtitulo.as_str(), v.linea.as_str()), ("En pausa", "2.350 / 11.029 · 21 % · 16,1 de 74,7 GB"));
+        // Cancelado tras unos lotes.
+        let c = ProgresoLiberar { fase: FaseLiberar::Terminado, cancelado: true, ..p };
+        let v = vista_liberar(&c, 1_000_060).unwrap();
+        assert_eq!((v.titulo.as_str(), v.linea.as_str()), ("Liberación cancelada", "Liberados 16,1 GB (2.350 de 11.029 elementos)"));
     }
 
     #[test]
