@@ -5,6 +5,10 @@ numeración: [SemVer](https://semver.org/lang/es/).
 
 ## [Sin publicar]
 
+## [0.2.0-rc.1] - 2026-11-08
+
+Ensayo del flujo de publicación. No es una versión para usar.
+
 ## [0.2.0] - AAAA-MM-DD
 
 ### Añadido
