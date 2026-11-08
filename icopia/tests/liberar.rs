@@ -267,27 +267,30 @@ fn muchos(n: usize) -> (tempfile::TempDir, Mutex<Registro>, FuenteFalsa, Vec<ico
 #[test]
 fn si_apple_pide_esperar_se_espera_y_se_reintenta_el_mismo_lote() {
     use icopia::progreso_liberar;
-    let (dir, reg, mut fuente, listos) = muchos(120);
+    let n = 2 * liberar::TAMANO_LOTE + 20; // 3 lotes
+    let (dir, reg, mut fuente, listos) = muchos(n);
     // Frena la 2.ª y la 3.ª llamada (el segundo lote, dos veces seguidas).
     fuente.frenar_llamadas = vec![1, 2];
     let r = liberar::ejecutar_con(dir.path(), &reg, &mut fuente, &listos, &|_, _| {}, &rapido()).unwrap();
-    assert_eq!((r.borrados, r.fallidos.len()), (120, 0), "nada falla por el frenazo: {:?}", r.fallidos);
+    assert_eq!((r.borrados, r.fallidos.len()), (n, 0), "nada falla por el frenazo: {:?}", r.fallidos);
     assert_eq!(fuente.llamadas_borrar, 5, "3 lotes + 2 reintentos del segundo");
     let p = progreso_liberar::leer(&reg.lock().unwrap()).unwrap();
-    assert_eq!((p.borrados, p.espera_hasta), (120, None));
+    assert_eq!((p.borrados, p.espera_hasta), (n as u64, None));
 }
 
 #[test]
 fn si_apple_no_deja_nunca_se_para_sin_dar_por_fallidos_a_los_elementos_por_su_culpa() {
-    let (dir, reg, mut fuente, listos) = muchos(120);
+    let lote = liberar::TAMANO_LOTE;
+    let n = lote + lote / 2 + 20;
+    let (dir, reg, mut fuente, listos) = muchos(n);
     fuente.frenar_llamadas = (1..100).collect();
     let r = liberar::ejecutar_con(dir.path(), &reg, &mut fuente, &listos, &|_, _| {}, &rapido()).unwrap();
-    assert_eq!(r.borrados, 50);
-    assert_eq!(r.fallidos.len(), 70);
+    assert_eq!(r.borrados, lote);
+    assert_eq!(r.fallidos.len(), n - lote);
     assert!(r.fallidos.iter().all(|(_, m)| m == liberar::LIMITE_APPLE));
     assert_eq!(fuente.llamadas_borrar, 1 + 1 + liberar::Politica::rapida().max_esperas, "se rinde tras los frenazos seguidos permitidos");
     // Lo no borrado sigue propuesto para la próxima vez.
-    assert_eq!(liberar::preparar(dir.path(), &reg, 30, motor::ahora(), &|_, _| {}).unwrap().listos.len(), 70);
+    assert_eq!(liberar::preparar(dir.path(), &reg, 30, motor::ahora(), &|_, _| {}).unwrap().listos.len(), n - lote);
 }
 
 #[test]

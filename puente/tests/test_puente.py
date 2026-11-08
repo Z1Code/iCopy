@@ -597,3 +597,56 @@ def test_dominio_china_se_pasa_a_pyicloud(monkeypatch):
     pi.Puente("yo@x.com", "c", dominio="cn").conectar()
     pi.Puente("yo@x.com", "c").conectar()
     assert vistos == ["cn", "com"]
+
+
+# --- Borrado en lote (varias operaciones en una sola petición records/modify) ---
+
+def test_borrar_en_lote_una_peticion_y_resultado_por_registro():
+    resp = Respuesta({"records": [
+        {"recordName": "A1", "fields": {"isDeleted": {"value": 1}}},
+        {"recordName": "A2", "serverErrorCode": "CONFLICT"},
+        {"recordName": "A3", "serverErrorCode": "ACCESS_DENIED"},
+    ]})
+    lib = LibFalsa(resp)
+    r = pi.marcar_borrado_lote(lib, [AssetFalso(id=i) for i in ("A1", "A2", "A3", "A4")], 1)
+    assert len(lib.session.envios) == 1
+    envio = lib.session.envios[0]
+    assert envio["atomic"] is False
+    assert [o["record"]["recordName"] for o in envio["operations"]] == ["A1", "A2", "A3", "A4"]
+    # A4 no vino en la respuesta: no se da por borrado
+    assert r == {"A1": None, "A2": "reintentar", "A3": "ACCESS_DENIED", "A4": "respuesta_desconocida"}
+
+
+def test_borrar_en_lote_limite_de_apple_marca_todo_el_lote():
+    lib = LibFalsa(Respuesta({}, status_code=503))
+    r = pi.marcar_borrado_lote(lib, [AssetFalso(id="A1"), AssetFalso(id="A2")], 1)
+    assert r == {"A1": "limite_apple", "A2": "limite_apple"}
+
+
+def test_puente_borra_en_lotes_de_100_y_se_detiene_si_apple_frena(salida):
+    llamadas = []
+
+    def lote(lib, assets):
+        llamadas.append(len(assets))
+        if len(llamadas) == 2:
+            return {a._asset_record["recordName"]: "limite_apple" for a in assets}
+        return {a._asset_record["recordName"]: None for a in assets}
+
+    p = pi.Puente("yo@x.com", "c", fabrica=lambda _pw: ApiFalsa(), borrador_lote=lote)
+    ids = [f"A{i}" for i in range(250)]
+    p.cache = {i: ("PrimarySync", "lib", AssetFalso(id=i)) for i in ids}
+    p.cache["S1"] = ("SharedSync-1", "lib2", AssetFalso(id="S1"))
+    p.manejar({"cmd": "borrar", "ids": ids + ["S1", "ZZ"]})
+    r = lineas(salida)[-1]
+    assert llamadas == [100, 100]           # el tercer lote no se envía tras el freno
+    assert r["borrados"] == ids[:100]
+    errores = {f["id"]: f["error"] for f in r["fallidos"]}
+    assert errores["S1"] == "biblioteca_compartida" and errores["ZZ"] == "no_listado"
+    assert all(errores[i] == "limite_apple" for i in ids[100:])
+
+
+def test_puente_sin_borrador_inyectado_usa_lotes():
+    p = pi.Puente("yo@x.com", "c", fabrica=lambda _pw: ApiFalsa())
+    assert p._borrador_lote is not None
+    p2 = pi.Puente("yo@x.com", "c", fabrica=lambda _pw: ApiFalsa(), borrador=lambda l, a: None)
+    assert p2._borrador_lote is None

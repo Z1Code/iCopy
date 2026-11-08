@@ -163,6 +163,58 @@ def restaurar_en_icloud(lib: Any, asset: Any) -> Optional[str]:
     return marcar_borrado(lib, asset, 0)
 
 
+LOTE_MODIFY = 100  # operaciones por petición records/modify (CloudKit admite hasta 200 registros)
+
+
+def marcar_borrado_lote(lib: Any, assets: List[Any], valor: int) -> Dict[str, Optional[str]]:
+    """Como marcar_borrado pero con varios assets en UNA petición (atomic=False: cada registro
+    se confirma o falla por separado). Devuelve {recordName del CPLAsset: None | código de error}."""
+    url = f"{lib.service_endpoint}/records/modify?{urllib.parse.urlencode(lib.params)}"
+    nombres = [a._asset_record["recordName"] for a in assets]
+    datos = json.dumps({
+        "atomic": False,
+        "desiredKeys": ["isDeleted"],
+        "operations": [{
+            "operationType": "update",
+            "record": {
+                "fields": {"isDeleted": {"value": valor}},
+                "recordChangeTag": a._asset_record["recordChangeTag"],
+                "recordName": a._asset_record["recordName"],
+                "recordType": "CPLAsset",
+            },
+        } for a in assets],
+        "zoneID": lib.zone_id,
+    })
+    try:
+        respuesta = lib.session.post(url, data=datos, headers={"Content-type": "application/json"})
+    except PyiCloudAPIResponseException as e:
+        if e.code == "TRY_AGAIN_LATER":
+            return {n: "reintentar" for n in nombres}
+        raise
+    estado = getattr(respuesta, "status_code", None)
+    if estado in (429, 503):
+        return {n: "limite_apple" for n in nombres}
+    if getattr(respuesta, "ok", True) is False or (isinstance(estado, int) and estado >= 400):
+        return {n: "respuesta_desconocida" for n in nombres}
+    try:
+        cuerpo = respuesta.json()
+    except ValueError:
+        return {n: "respuesta_desconocida" for n in nombres}
+    registros = cuerpo.get("records") if isinstance(cuerpo, dict) else None
+    # Solo cuenta como hecho lo que iCloud confirma explícitamente, registro por registro.
+    resultado: Dict[str, Optional[str]] = {n: "respuesta_desconocida" for n in nombres}
+    for registro in registros if isinstance(registros, list) else []:
+        nombre = registro.get("recordName") if isinstance(registro, dict) else None
+        if nombre not in resultado:
+            continue
+        if "serverErrorCode" in registro:
+            codigo = str(registro["serverErrorCode"])
+            resultado[nombre] = "reintentar" if codigo in ("TRY_AGAIN_LATER", "CONFLICT", "OPLOCK_FAILURE") else codigo
+        else:
+            resultado[nombre] = None
+    return resultado
+
+
 def marcar_borrado(lib: Any, asset: Any, valor: int) -> Optional[str]:
     """records/modify del CPLAsset con isDeleted = valor (necesita su recordChangeTag actual)."""
     url = f"{lib.service_endpoint}/records/modify?{urllib.parse.urlencode(lib.params)}"
@@ -261,7 +313,8 @@ class Puente:
                  fabrica: Optional[Callable[[Optional[str]], Any]] = None,
                  borrador: Optional[Callable[[Any, Any], Optional[str]]] = None,
                  restaurador: Optional[Callable[[Any, Any], Optional[str]]] = None,
-                 dominio: str = "com") -> None:
+                 dominio: str = "com",
+                 borrador_lote: Optional[Callable[[Any, List[Any]], Dict[str, Optional[str]]]] = None) -> None:
         self.apple_id = apple_id
         self.cookies = cookies
         self.dominio = dominio
@@ -270,6 +323,13 @@ class Puente:
         self._fabrica = fabrica or self._fabrica_real
         self._borrador = borrador or borrar_en_icloud
         self._restaurador = restaurador or restaurar_en_icloud
+        # Borrado en lote por defecto; si se inyecta un borrador individual (pruebas), se usa ese.
+        if borrador_lote is not None:
+            self._borrador_lote = borrador_lote
+        elif borrador is None:
+            self._borrador_lote = lambda lib, assets: marcar_borrado_lote(lib, assets, 1)
+        else:
+            self._borrador_lote = None
 
     def _fabrica_real(self, password: Optional[str]) -> Any:
         # "com" (todo el mundo) o "cn" (iCloud de China continental).
@@ -413,6 +473,9 @@ class Puente:
 
     def borrar(self, ids: List[str]) -> None:
         """Responde siempre con lo hecho hasta el momento, aunque algo falle a mitad del lote."""
+        if self._borrador_lote is not None:
+            self._borrar_en_lotes(ids)
+            return
         borrados: List[str] = []
         fallidos: List[Dict[str, str]] = []
         sesion_caducada = False
@@ -440,6 +503,42 @@ class Puente:
                 fallidos.append({"id": i, "error": error})
             else:
                 borrados.append(i)
+        responder({"ok": True, "borrados": borrados, "fallidos": fallidos})
+
+    def _borrar_en_lotes(self, ids: List[str]) -> None:
+        """Agrupa los ids por biblioteca y los manda en peticiones de hasta LOTE_MODIFY.
+        Mismas reglas que el borrado individual; responde con lo hecho aunque algo falle."""
+        borrados: List[str] = []
+        fallidos: List[Dict[str, str]] = []
+        validos: List[Tuple[str, Any, Any]] = []
+        for i in ids:
+            entrada = self.cache.get(i)
+            if entrada is None:
+                fallidos.append({"id": i, "error": "no_listado"})
+            elif entrada[0] != BIBLIOTECA_PERSONAL:
+                fallidos.append({"id": i, "error": "biblioteca_compartida"})
+            else:
+                validos.append((i, entrada[1], entrada[2]))
+        parado: Optional[str] = None
+        for desde in range(0, len(validos), LOTE_MODIFY):
+            lote = validos[desde:desde + LOTE_MODIFY]
+            if parado:
+                fallidos += [{"id": i, "error": parado} for i, _, _ in lote]
+                continue
+            lib = lote[0][1]
+            try:
+                resultado = self._borrador_lote(lib, [a for _, _, a in lote])
+            except Exception as e:  # noqa: BLE001
+                error = _codigo_de_excepcion(e, f"lote de {len(lote)}")
+                resultado = {a._asset_record["recordName"]: error for _, _, a in lote}
+            for i, _, asset in lote:
+                error = resultado.get(asset._asset_record["recordName"], "respuesta_desconocida")
+                if error in ("limite_apple", "sesion_caducada"):
+                    parado = error
+                if error:
+                    fallidos.append({"id": i, "error": error})
+                else:
+                    borrados.append(i)
         responder({"ok": True, "borrados": borrados, "fallidos": fallidos})
 
     def papelera(self, lib: Any) -> Any:
@@ -479,14 +578,19 @@ def _aplicar(funcion: Callable[[Any, Any], Optional[str]], lib: Any, asset: Any)
     try:
         return funcion(lib, asset)
     except Exception as e:  # noqa: BLE001
-        if es_limite_de_apple(e):
-            logging.warning("Apple pide esperar: %s", e)
-            return "limite_apple"
-        if isinstance(e, SesionCaducada) or (
-                isinstance(e, PyiCloudAPIResponseException) and es_error_de_sesion(e)):
-            return "sesion_caducada"
-        logging.exception("fallo con %s", getattr(asset, "id", "?"))
-        return f"desconocido: {type(e).__name__}: {e}"
+        return _codigo_de_excepcion(e, getattr(asset, "id", "?"))
+
+
+def _codigo_de_excepcion(e: Exception, que: str) -> str:
+    """Traduce una excepción de iCloud a un código de error del protocolo."""
+    if es_limite_de_apple(e):
+        logging.warning("Apple pide esperar: %s", e)
+        return "limite_apple"
+    if isinstance(e, SesionCaducada) or (
+            isinstance(e, PyiCloudAPIResponseException) and es_error_de_sesion(e)):
+        return "sesion_caducada"
+    logging.exception("fallo con %s", que)
+    return f"desconocido: {type(e).__name__}: {e}"
 
 
 def main(argv: Optional[List[str]] = None) -> None:

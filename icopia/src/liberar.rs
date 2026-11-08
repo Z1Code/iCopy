@@ -11,7 +11,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-pub const TAMANO_LOTE: usize = 50;
+/// Elementos por tanda: el puente los manda a iCloud en peticiones de 100 (records/modify en lote).
+pub const TAMANO_LOTE: usize = 200;
 const CABECERA_CSV: &str = "fecha_borrado,asset_id,nombre,fecha_captura,archivos,sesion";
 
 #[derive(Debug, Clone, PartialEq)]
