@@ -5,7 +5,7 @@ numeración: [SemVer](https://semver.org/lang/es/).
 
 ## [Sin publicar]
 
-## [0.2.0] - AAAA-MM-DD
+## [0.2.0] - 2026-11-08
 
 ### Añadido
 - Instalador para Windows (`iCopy-Setup-0.2.0.exe`): sin permisos de administrador, menú Inicio,
