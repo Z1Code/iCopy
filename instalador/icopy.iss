@@ -3,6 +3,11 @@
   #error Falta /DVersion=X.Y.Z
 #endif
 #define Raiz ".."
+#if Pos("-", Version) > 0
+  #define NumVersion Copy(Version, 1, Pos("-", Version) - 1)
+#else
+  #define NumVersion Version
+#endif
 
 [Setup]
 AppId={{8F2C4E1A-6B7D-4C3E-9A51-2D7E0B6F4C19}
@@ -22,7 +27,8 @@ OutputBaseFilename=iCopy-Setup-{#Version}
 SetupIconFile={#Raiz}\icopia\assets\icopia.ico
 UninstallDisplayIcon={app}\icopia-bandeja.exe
 UninstallDisplayName=iCopy
-VersionInfoVersion={#Version}
+; VersionInfoVersion solo admite números: sin el «-rc.1» de las preversiones.
+VersionInfoVersion={#NumVersion}
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
