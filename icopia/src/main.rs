@@ -22,6 +22,7 @@ use std::time::Duration;
 const AYUDA: &str = "icopia — copia tus fotos de iCloud al PC
 
 Uso:
+  icopia --version               Muestra la versión
   icopia destino <carpeta>       Fija la carpeta donde se guardan las fotos
   icopia login                   Inicia sesión en iCloud (contraseña + código 2FA)
   icopia diagnostico             Comprueba la sesión y que las descargas funcionan
@@ -54,6 +55,10 @@ fn main() {
 
 fn ejecutar(args: &[String]) -> Result<()> {
     match args.first().map(String::as_str) {
+        Some("--version") | Some("-V") => {
+            println!("iCopy {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         Some("destino") => cmd_destino(args.get(1)),
         Some("login") => cmd_login(),
         Some("diagnostico") => cmd_diagnostico(),

@@ -178,6 +178,7 @@ fn main() {
         lanzar_login(&tx, &cancelar, false);
     }
 
+    let i_version = MenuItem::new(format!("iCopy {}", env!("CARGO_PKG_VERSION")), false, None);
     let i_estado = MenuItem::new(t(T::MenuIniciando), false, None);
     let i_copiar = MenuItem::new(t(T::MenuCopiar), true, None);
     let i_pausa = MenuItem::new(t(T::MenuPausar), true, None);
@@ -190,6 +191,8 @@ fn main() {
     let i_salir = MenuItem::new(t(T::MenuSalir), true, None);
     let menu = Menu::new();
     menu.append_items(&[
+        &i_version,
+        &PredefinedMenuItem::separator(),
         &i_estado,
         &PredefinedMenuItem::separator(),
         &i_copiar,
