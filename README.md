@@ -122,6 +122,12 @@ contraseña y el código de 6 dígitos de tu iPhone). La contraseña no se guard
 | Iniciar sesión en iCloud… | Abre la ventana de inicio de sesión (2FA) |
 | Iniciar con Windows | Activa o desactiva el arranque automático |
 
+Mientras se libera espacio (desde el menú o con `icopia liberar`), el panel muestra una segunda barra
+con la fase (consultando iCloud, comprobando archivos en disco, borrando), el avance, los GB y el
+tiempo restante; el tooltip del icono también lo dice. Al terminar queda un resumen durante 24 h
+(lo liberado, los fallos si los hubo y el recordatorio de vaciar «Eliminado recientemente»), y si el
+proceso se cierra a medias se muestra como interrumpido.
+
 **Línea de comandos** (`icopia.exe`):
 
 ```

@@ -9,11 +9,12 @@ use icopia::modelo::BIBLIOTECA_PERSONAL;
 use icopia::liberar;
 use icopia::login::{FlujoLogin, Paso};
 use icopia::motor::{self, Avance, FinRonda, Listado, OpcionesRonda};
+use icopia::progreso_liberar::{self, FaseLiberar, Seguimiento};
 use icopia::puente::Puente;
 use icopia::registro::Registro;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -298,21 +299,56 @@ fn cmd_liberar(args: &[String]) -> Result<()> {
         }
     };
     let registro = Mutex::new(abrir_registro(&destino)?);
-    let mut puente = abrir_puente(&cfg)?;
+    // El avance queda en el registro para que la bandeja lo muestre; un error lo deja como fallido.
+    let r = liberar_con_registro(&cfg, &destino, &registro, dias);
+    if let Err(e) = &r {
+        progreso_liberar::marcar_fallido(&registro, &format!("{e:#}"));
+    }
+    r
+}
+
+/// Mientras se espera la confirmación, renueva el avance cada 20 s (si no, la bandeja lo daría por abandonado).
+fn preguntar_con_latido(texto: &str, registro: &Mutex<Registro>) -> Result<String> {
+    let fin = AtomicBool::new(false);
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            let mut n = 0;
+            while !fin.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(250));
+                n += 1;
+                if n % 80 == 0 {
+                    progreso_liberar::latir(registro);
+                }
+            }
+        });
+        let r = preguntar(texto);
+        fin.store(true, Ordering::Relaxed);
+        r
+    })
+}
+
+fn liberar_con_registro(cfg: &Config, destino: &Path, registro: &Mutex<Registro>, dias: u32) -> Result<()> {
+    let dir_datos = destino.join(".icopia");
+    let previsto = registro.lock().unwrap().assets_ultimo_listado()?.unwrap_or(0);
+    let mut seg = Seguimiento::empezar(registro, dias);
+    seg.fase(FaseLiberar::Listando, previsto, 0);
+    let mut puente = abrir_puente(cfg)?;
     let cancelar = AtomicBool::new(false);
     println!("Consultando iCloud para trabajar con datos frescos…");
+    let seg = Mutex::new(seg);
     let avance_lista = |a: Avance| {
         if let Avance::Listando { vistos } = a {
+            seg.lock().unwrap().avance(vistos as u64, 0);
             eprint!("\r  {vistos} elementos…");
         }
     };
-    match motor::listar_en_registro(&registro, &mut puente, &cancelar, &avance_lista)? {
+    match motor::listar_en_registro(registro, &mut puente, &cancelar, &avance_lista)? {
         Listado::Completo(n) => eprintln!("\r  {n} elementos en iCloud."),
         Listado::Interrumpido(FinRonda::SesionCaducada, _) => bail!("La sesión de iCloud caducó: ejecuta `icopia login`"),
         Listado::Interrumpido(..) => bail!("El listado de iCloud no terminó; no se borra nada."),
     }
     println!("Re-verificando en disco cada archivo antes de proponer nada…");
-    let plan = liberar::preparar(&destino, &registro, dias, motor::ahora(), &|h, t| {
+    let plan = liberar::preparar(destino, registro, dias, motor::ahora(), &|h, t| {
         if h % 100 == 0 || h == t {
             eprint!("\r  {h}/{t}");
         }
@@ -344,11 +380,12 @@ fn cmd_liberar(args: &[String]) -> Result<()> {
         return Ok(());
     }
     println!("\nLo borrado irá a \"Eliminado recientemente\" (recuperable 30 días). Tus archivos del PC no se tocan.");
-    if preguntar("Escribe BORRAR para confirmar: ")? != "BORRAR" {
+    if preguntar_con_latido("Escribe BORRAR para confirmar: ", registro)? != "BORRAR" {
+        Seguimiento::continuar(registro, None).descartar();
         println!("Cancelado. No se borró nada.");
         return Ok(());
     }
-    let r = liberar::ejecutar(&destino, &registro, &mut puente, &plan.listos, &|h, t| eprint!("\r  borrados {h}/{t}"))?;
+    let r = liberar::ejecutar(destino, registro, &mut puente, &plan.listos, &|h, t| eprint!("\r  borrados {h}/{t}"))?;
     eprintln!();
     println!("Borrados de iCloud: {}", r.borrados);
     if !r.fallidos.is_empty() {

@@ -8,6 +8,7 @@ use icopia::bandeja::hilo_motor::{self, Orden};
 use icopia::bandeja::{autoarranque, avisos, icono};
 use icopia::config::{self, Config};
 use icopia::fuente::FuenteIcloud;
+use icopia::progreso_liberar::{self, ProgresoLiberar};
 use icopia::puente::Puente;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -21,8 +22,8 @@ use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, 
 enum Ev {
     Ui(EventoUi),
     Bandeja(TrayIconEvent),
-    /// Lectura fresca del registro mientras el panel está abierto.
-    Progreso(icopia::registro::Progreso),
+    /// Lectura fresca del registro: totales (solo con el panel abierto) y avance de "liberar espacio".
+    Lectura { progreso: Option<icopia::registro::Progreso>, liberar: Option<ProgresoLiberar> },
 }
 
 /// Menú contextual del icono. Para que se cierre al hacer clic fuera, su ventana dueña tiene que
@@ -46,28 +47,41 @@ fn centro_de(r: &tray_icon::Rect) -> (i32, i32) {
     (r.position.x as i32 + r.size.width as i32 / 2, r.position.y as i32 + r.size.height as i32 / 2)
 }
 
-/// Mientras el panel está abierto, relee el registro cada segundo (solo lectura, en su hilo)
-/// para que los totales nunca sean un dato viejo.
+/// Relee el registro (solo lectura, en su hilo): cada segundo con el panel abierto, para que los
+/// totales nunca sean un dato viejo; cada 5 s con él cerrado, solo el avance de "liberar espacio"
+/// (lo escribe otro proceso) para el tooltip.
 fn sondear_registro(abierto: Arc<AtomicBool>, proxy: tao::event_loop::EventLoopProxy<Ev>) {
     std::thread::spawn(move || {
         let mut abierta: Option<(std::path::PathBuf, icopia::registro::Registro)> = None;
+        let mut vuelta = 0u64;
         loop {
             std::thread::sleep(Duration::from_secs(1));
-            if !abierto.load(Ordering::Relaxed) {
-                abierta = None;
+            vuelta += 1;
+            let panel = abierto.load(Ordering::Relaxed);
+            if !panel && vuelta % 5 != 0 {
                 continue;
             }
             let Some(ruta) = Config::cargar().ok().and_then(|c| c.destino).map(|d| d.join(".icopia").join("registro.db")) else { continue };
             if abierta.as_ref().is_none_or(|(r, _)| *r != ruta) {
                 abierta = ruta.exists().then(|| icopia::registro::Registro::abrir_lectura(&ruta).ok().map(|reg| (ruta, reg))).flatten();
             }
-            if let Some(p) = abierta.as_ref().and_then(|(_, reg)| reg.progreso().ok()) {
-                if proxy.send_event(Ev::Progreso(p)).is_err() {
-                    return;
-                }
+            let Some((_, reg)) = abierta.as_ref() else { continue };
+            let progreso = if panel { reg.progreso().ok() } else { None };
+            let liberar = progreso_liberar::leer(reg);
+            if proxy.send_event(Ev::Lectura { progreso, liberar }).is_err() {
+                return;
             }
         }
     });
+}
+
+/// Tooltip del icono: mientras se libera espacio, ese avance; si no, el estado de la copia.
+fn texto_tooltip(estado: &EstadoUi, liberar: Option<&ProgresoLiberar>) -> String {
+    let ahora = chrono::Utc::now().timestamp();
+    match liberar.and_then(|p| icopia::bandeja::panel::texto_bandeja_liberar(p, ahora)) {
+        Some(t) => format!("icopia — {t}"),
+        None => format!("icopia — {}", estado.texto()),
+    }
 }
 
 fn instancia_unica() -> bool {
@@ -200,6 +214,7 @@ fn main() {
     let mut pausado = false;
     let mut ultimo_refresco = Instant::now();
     let mut tooltip = String::from("icopia");
+    let mut liberar: Option<ProgresoLiberar> = None;
     let mut tooltip_puesto: Option<String> = Some(tooltip.clone());
 
     let (tx_pausa, cancelar_pausa) = (tx.clone(), cancelar.clone());
@@ -251,7 +266,6 @@ fn main() {
             Event::UserEvent(Ev::Ui(EventoUi::Estado(e))) => {
                 let t = e.texto();
                 i_estado.set_text(&t);
-                tooltip = format!("icopia — {t}");
                 if let Some(tr) = &tray {
                     if e.color() != estado.color() || estado.fase == Fase::Inactiva && estado.total == 0 {
                         let _ = tr.set_icon(Some(icono_de(e.color())));
@@ -270,8 +284,18 @@ fn main() {
                     p.cambio_de_estado(&estado, &e);
                 }
                 estado = e;
+                tooltip = texto_tooltip(&estado, liberar.as_ref());
             }
-            Event::UserEvent(Ev::Progreso(p)) => estado.actualizar_progreso(&p),
+            Event::UserEvent(Ev::Lectura { progreso, liberar: l }) => {
+                if let Some(p) = progreso {
+                    estado.actualizar_progreso(&p);
+                }
+                liberar = l;
+                tooltip = texto_tooltip(&estado, liberar.as_ref());
+                if let Some(p) = panel.as_mut() {
+                    p.poner_liberar(liberar.clone());
+                }
+            }
             Event::UserEvent(Ev::Ui(EventoUi::Aviso { titulo, texto })) => avisos::mostrar(&titulo, &texto),
             Event::UserEvent(Ev::Bandeja(TrayIconEvent::Enter { rect, .. } | TrayIconEvent::Move { rect, .. })) => {
                 if let Some(p) = panel.as_mut() {

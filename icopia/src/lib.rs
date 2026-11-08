@@ -14,6 +14,7 @@ pub mod registro;
 pub mod verificar;
 pub mod auditoria;
 pub mod liberar;
+pub mod progreso_liberar;
 pub mod planificador;
 pub mod bandeja;
 pub mod login;

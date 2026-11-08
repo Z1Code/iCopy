@@ -2,9 +2,10 @@
 //! junto al reloj (como los paneles de Wi-Fi o volumen de Windows 11).
 use crate::bandeja::estado::EstadoUi;
 use crate::bandeja::hover::{self, Hover, Rect, VigiaClics};
-use crate::bandeja::panel::{es_nueva_ronda, principal, vista, Medidas, MediaRonda, Principal, Velocimetro};
+use crate::bandeja::panel::{es_nueva_ronda, principal, vista, vista_liberar, Medidas, MediaRonda, Principal, Velocimetro, Vista};
 use crate::bandeja::panel_gdi::{self, Boton, Lienzo};
 use crate::descarga::BYTES_RECIBIDOS;
+use crate::progreso_liberar::ProgresoLiberar;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use tao::dpi::PhysicalSize;
@@ -95,6 +96,10 @@ pub struct Panel {
     t0: Instant,
     /// Gancho de ratón de bajo nivel (solo mientras el panel está abierto).
     gancho: Option<isize>,
+    /// Último avance de "liberar espacio" leído del registro.
+    liberar: Option<ProgresoLiberar>,
+    /// Alto actual del panel a 96 ppp (crece con la sección de liberar).
+    alto: i32,
 }
 
 impl Panel {
@@ -133,7 +138,14 @@ impl Panel {
             ultima_muestra: None,
             t0: Instant::now(),
             gancho: None,
+            liberar: None,
+            alto: panel_gdi::ALTO,
         }
+    }
+
+    /// Nuevo avance de "liberar espacio" (o `None`): se verá en el próximo repintado.
+    pub fn poner_liberar(&mut self, p: Option<ProgresoLiberar>) {
+        self.liberar = p;
     }
 
     pub fn id(&self) -> WindowId {
@@ -281,8 +293,9 @@ impl Panel {
         }
     }
 
-    /// Muestra el panel junto a la bandeja; con ctivar, además le da el foco.
-    pub fn mostrar(&mut self, ancla: (i32, i32), estado: &EstadoUi, activar: bool) {
+    /// Coloca el panel junto a la bandeja con el alto actual (crece hacia arriba si la barra está abajo).
+    fn colocar(&mut self) {
+        let ancla = self.ancla;
         unsafe {
             use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
             let monitor = gdi::MonitorFromPoint(POINT { x: ancla.0, y: ancla.1 }, gdi::MONITOR_DEFAULTTONEAREST);
@@ -292,7 +305,7 @@ impl Panel {
             let (mut dx, mut dy) = (96u32, 96u32);
             GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dx, &mut dy);
             let escala = dx as f32 / 96.0;
-            let (w, h) = ((panel_gdi::ANCHO as f32 * escala).round() as i32, (panel_gdi::ALTO as f32 * escala).round() as i32);
+            let (w, h) = ((panel_gdi::ANCHO as f32 * escala).round() as i32, (self.alto as f32 * escala).round() as i32);
             let margen = (12.0 * escala).round() as i32;
             let (m, t) = (info.rcMonitor, info.rcWork);
             // La barra de tareas puede estar abajo (lo normal), arriba o a un lado.
@@ -303,6 +316,13 @@ impl Panel {
             SetWindowPos(self.ventana.hwnd() as HWND, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE);
             self.escala = escala;
         }
+    }
+
+    /// Muestra el panel junto a la bandeja; con `activar`, además le da el foco.
+    pub fn mostrar(&mut self, ancla: (i32, i32), estado: &EstadoUi, activar: bool) {
+        self.ancla = ancla;
+        self.alto = panel_gdi::alto(&self.vista_actual(estado));
+        self.colocar();
         self.oscuro = panel_gdi::tema_oscuro();
         self.hover = None;
         self.pintar(estado);
@@ -333,9 +353,11 @@ impl Panel {
         self.oculto_en = Some(Instant::now());
     }
 
-    /// Cada cuánto hay que repintar mientras está abierto (el punto "En vivo" late).
+    /// Cada cuánto hay que repintar mientras está abierto (el punto "En vivo" late; la barra
+    /// indeterminada de liberar se mueve).
     pub fn intervalo(&self, estado: &EstadoUi) -> Duration {
-        if crate::bandeja::panel::indicador(estado).late() {
+        let anima_liberar = self.liberar.as_ref().and_then(|p| vista_liberar(p, chrono::Utc::now().timestamp())).is_some_and(|v| v.fraccion.is_none());
+        if crate::bandeja::panel::indicador(estado).late() || anima_liberar {
             Duration::from_millis(50)
         } else {
             Duration::from_secs(1)
@@ -345,6 +367,12 @@ impl Panel {
     /// Repinta el contenido y lo lleva a la pantalla.
     pub fn refrescar(&mut self, estado: &EstadoUi) {
         if self.visible() {
+            let alto = panel_gdi::alto(&self.vista_actual(estado));
+            if alto != self.alto {
+                self.alto = alto;
+                self.colocar();
+                self.hover = None;
+            }
             self.pintar(estado);
             self.volcar();
         }
@@ -361,14 +389,21 @@ impl Panel {
             self.lienzo = Some(Lienzo::nuevo(w, h));
         }
         let pulso = (self.t0.elapsed().as_secs_f32() / 1.6).fract();
+        let v = self.vista_actual(estado);
+        let l = self.lienzo.as_mut().expect("lienzo");
+        panel_gdi::pintar(l, &v, self.oscuro, self.escala, self.hover, pulso);
+    }
+
+    fn vista_actual(&self, estado: &EstadoUi) -> Vista {
         let medidas = Medidas {
             bytes_por_seg: self.velocimetro.bytes_por_seg(),
             elementos_por_seg: self.ritmo_listado.bytes_por_seg(),
             media_ultima_ronda: self.media_ronda.media(),
         };
-        let v = vista(estado, medidas, chrono::Utc::now().timestamp());
-        let l = self.lienzo.as_mut().expect("lienzo");
-        panel_gdi::pintar(l, &v, self.oscuro, self.escala, self.hover, pulso);
+        let ahora = chrono::Utc::now().timestamp();
+        let mut v = vista(estado, medidas, ahora);
+        v.liberar = self.liberar.as_ref().and_then(|p| vista_liberar(p, ahora));
+        v
     }
 
     fn volcar(&self) {
@@ -391,7 +426,7 @@ impl Panel {
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed && event.logical_key == Key::Escape => self.ocultar(),
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x / self.escala as f64, position.y / self.escala as f64);
-                let b = panel_gdi::boton_en(self.cursor.0, self.cursor.1);
+                let b = panel_gdi::boton_en(self.cursor.0, self.cursor.1, self.alto);
                 if b != self.hover {
                     self.hover = b;
                     self.refrescar(estado);
@@ -402,9 +437,9 @@ impl Panel {
                     self.refrescar(estado);
                 }
             }
-            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => self.pulsado = panel_gdi::boton_en(self.cursor.0, self.cursor.1),
+            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => self.pulsado = panel_gdi::boton_en(self.cursor.0, self.cursor.1, self.alto),
             WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. } => {
-                let suelto = panel_gdi::boton_en(self.cursor.0, self.cursor.1);
+                let suelto = panel_gdi::boton_en(self.cursor.0, self.cursor.1, self.alto);
                 return self.pulsado.take().filter(|&b| Some(b) == suelto).map(|b| match b {
                     Boton::Pausa => Accion::Principal(principal(estado)),
                     Boton::Carpeta => Accion::AbrirCarpeta,

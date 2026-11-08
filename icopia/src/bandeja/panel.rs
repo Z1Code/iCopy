@@ -1,6 +1,7 @@
 //! Lógica del panel de progreso de la bandeja (sin dibujo): textos, indicador, velocidad y
 //! tiempo restante.
 use crate::bandeja::estado::{miles, EstadoUi, Fase};
+use crate::progreso_liberar::{FaseLiberar, ProgresoLiberar, Situacion};
 use std::collections::VecDeque;
 
 /// Indicador de la cabecera del panel.
@@ -255,6 +256,142 @@ pub struct Vista {
     pub listado: String,
     pub errores: String,
     pub principal: Principal,
+    /// Sección de "liberar espacio" (solo si hay uno en marcha o terminado hace menos de un día).
+    pub liberar: Option<VistaLiberar>,
+}
+
+/// Color de la sección de liberar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TonoLiberar {
+    /// En marcha (ámbar).
+    Activo,
+    /// Terminado bien (verde).
+    Hecho,
+    /// Falló o se interrumpió.
+    Problema,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct VistaLiberar {
+    pub titulo: String,
+    pub subtitulo: String,
+    /// `None` = barra indeterminada.
+    pub fraccion: Option<f64>,
+    pub linea: String,
+    pub linea2: String,
+    pub tono: TonoLiberar,
+}
+
+/// "74,7 GB": un decimal por debajo de 100 en su unidad.
+pub fn bytes_dec(b: u64) -> String {
+    let (u, nombre) = unidad(b);
+    format!("{} {nombre}", dec(b as f64 / u, u > 1.0))
+}
+
+/// "16,1 de 74,7 GB": ambas cifras en la unidad de la mayor, con un decimal por debajo de 100.
+pub fn par_bytes_dec(a: u64, b: u64) -> String {
+    let (u, nombre) = unidad(a.max(b));
+    let grande = b as f64 / u >= 100.0;
+    let f = |v: u64| dec(v as f64 / u, u > 1.0 && !grande);
+    format!("{} de {} {nombre}", f(a), f(b))
+}
+
+fn dec(x: f64, decimal: bool) -> String {
+    if decimal && x < 100.0 {
+        format!("{x:.1}").replace('.', ",")
+    } else {
+        miles(x.round() as u64)
+    }
+}
+
+fn pct(p: &ProgresoLiberar) -> u64 {
+    p.fraccion().map(|f| (f * 100.0).floor() as u64).unwrap_or(0)
+}
+
+/// Sección del panel para un liberar guardado en el registro; `None` si no hay nada que mostrar.
+pub fn vista_liberar(p: &ProgresoLiberar, ahora_unix: i64) -> Option<VistaLiberar> {
+    let sit = p.situacion(ahora_unix)?;
+    let eta = p.restante_seg().map(|s| format!(" · {}", duracion(s))).unwrap_or_default();
+    let v = match sit {
+        Situacion::EnCurso => {
+            let (subtitulo, fraccion, linea) = match p.fase {
+                FaseLiberar::Listando if p.total > 0 => {
+                    ("Consultando iCloud…", p.fraccion(), format!("{} de ~{} elementos{eta}", miles(p.hechos), miles(p.total)))
+                }
+                FaseLiberar::Listando => ("Consultando iCloud…", None, format!("{} elementos vistos", miles(p.hechos))),
+                _ => (
+                    if p.fase == FaseLiberar::Borrando { "Borrando en iCloud…" } else { "Comprobando archivos en disco…" },
+                    p.fraccion().or(Some(0.0)),
+                    format!("{} / {} · {} % · {}{eta}", miles(p.hechos), miles(p.total), pct(p), par_bytes_dec(p.bytes_hechos, p.bytes_total)),
+                ),
+            };
+            let linea2 = match p.fase {
+                FaseLiberar::Borrando if p.fallidos > 0 => format!("{} no se pudieron borrar · se reintentarán", miles(p.fallidos)),
+                FaseLiberar::Borrando => "Van a «Eliminado recientemente» · el PC no se toca".into(),
+                _ => format!("Se conservan los últimos {} días y la Fototeca Compartida", p.dias),
+            };
+            VistaLiberar { titulo: "Liberando espacio en iCloud".into(), subtitulo: subtitulo.into(), fraccion, linea, linea2, tono: TonoLiberar::Activo }
+        }
+        Situacion::Confirmando => VistaLiberar {
+            titulo: "Liberando espacio en iCloud".into(),
+            subtitulo: "Esperando tu confirmación…".into(),
+            fraccion: Some(0.0),
+            linea: format!("Listos para borrar: {} elementos · {}", miles(p.total), bytes_dec(p.bytes_total)),
+            linea2: "Escribe BORRAR en la ventana de la consola".into(),
+            tono: TonoLiberar::Activo,
+        },
+        Situacion::Terminado => {
+            let mut subtitulo = format!("Terminado {}", hace(ahora_unix - p.actualizado_unix));
+            if p.fallidos > 0 {
+                subtitulo.push_str(&format!(" · {} no se pudieron borrar", miles(p.fallidos)));
+            }
+            VistaLiberar {
+                titulo: "Espacio liberado en iCloud".into(),
+                subtitulo,
+                fraccion: Some(1.0),
+                linea: format!("Liberados {} ({})", bytes_dec(p.bytes_hechos), plural(p.borrados, "elemento", "elementos")),
+                linea2: "Vacía «Eliminado recientemente» para recuperarlo".into(),
+                tono: TonoLiberar::Hecho,
+            }
+        }
+        Situacion::Fallido | Situacion::Interrumpido => {
+            let cuando = hace(ahora_unix - p.actualizado_unix);
+            let subtitulo = match (&p.error, sit) {
+                (Some(e), Situacion::Fallido) => format!("Falló {cuando}: {e}"),
+                (None, Situacion::Fallido) => format!("Falló {cuando}"),
+                _ => format!("Se detuvo {cuando} sin terminar"),
+            };
+            let linea = if p.borrados > 0 {
+                format!("Borrados {} de {} · {}", miles(p.borrados), miles(p.total), bytes_dec(p.bytes_hechos))
+            } else {
+                "No se borró nada de iCloud".into()
+            };
+            VistaLiberar {
+                titulo: "No se terminó de liberar espacio".into(),
+                subtitulo,
+                fraccion: p.fraccion().filter(|_| p.borrados > 0),
+                linea,
+                linea2: "Puedes volver a intentarlo desde el menú del icono".into(),
+                tono: TonoLiberar::Problema,
+            }
+        }
+    };
+    Some(VistaLiberar { fraccion: v.fraccion.map(|f| f.clamp(0.0, 1.0)), ..v })
+}
+
+/// Texto del tooltip mientras se libera espacio (solo en marcha); `None` en otro caso.
+pub fn texto_bandeja_liberar(p: &ProgresoLiberar, ahora_unix: i64) -> Option<String> {
+    let t = match (p.situacion(ahora_unix)?, p.fase) {
+        (Situacion::Confirmando, _) => "Liberando iCloud: esperando tu confirmación".to_string(),
+        (Situacion::EnCurso, FaseLiberar::Listando) => format!("Liberando iCloud: consultando… ({} vistos)", miles(p.hechos)),
+        (Situacion::EnCurso, FaseLiberar::Reverificando) => format!("Liberando iCloud: comprobando {} de {}", miles(p.hechos), miles(p.total)),
+        (Situacion::EnCurso, _) => {
+            let eta = p.restante_seg().map(|s| format!(" · {}", duracion(s))).unwrap_or_default();
+            format!("Liberando iCloud: {} de {} borrados ({} %){eta}", miles(p.hechos), miles(p.total), pct(p))
+        }
+        _ => return None,
+    };
+    Some(t)
 }
 
 fn plural(n: u64, uno: &str, varios: &str) -> String {
@@ -379,6 +516,7 @@ pub fn vista(e: &EstadoUi, m: Medidas, ahora_unix: i64) -> Vista {
         listado: d.ultimo_listado.map(|t| hace(ahora_unix - t)).unwrap_or_else(|| "nunca".into()),
         errores: miles(d.con_error),
         principal: principal(e),
+        liberar: None,
     }
 }
 
@@ -568,5 +706,89 @@ mod tests {
         // Terminar sin haber empezado no hace nada.
         m.terminar(50.0, 999_999);
         assert_eq!(m.media(), Some(10_000.0));
+    }
+
+    fn liberar(fase: FaseLiberar, hechos: u64, total: u64) -> ProgresoLiberar {
+        ProgresoLiberar {
+            fase,
+            hechos,
+            total,
+            bytes_hechos: 16_100_000_000,
+            bytes_total: 74_700_000_000,
+            inicio_unix: 900_000,
+            actualizado_unix: 1_000_000,
+            borrados: hechos,
+            fallidos: 0,
+            dias: 30,
+            por_seg: Some((total - hechos) as f64 / (14.0 * 60.0)),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn formatos_de_bytes_con_decimal() {
+        assert_eq!(par_bytes_dec(16_100_000_000, 74_700_000_000), "16,1 de 74,7 GB");
+        assert_eq!(par_bytes_dec(16_100_000_000, 174_700_000_000), "16 de 175 GB");
+        assert_eq!(bytes_dec(74_700_000_000), "74,7 GB");
+        assert_eq!(bytes_dec(1_260_000_000_000), "1,3 TB");
+        assert_eq!(bytes_dec(512), "512 B");
+    }
+
+    #[test]
+    fn liberar_borrando_con_barra_y_tiempo() {
+        let p = liberar(FaseLiberar::Borrando, 2_350, 11_029);
+        let v = vista_liberar(&p, 1_000_005).unwrap();
+        assert_eq!((v.titulo.as_str(), v.subtitulo.as_str()), ("Liberando espacio en iCloud", "Borrando en iCloud…"));
+        assert_eq!(v.linea, "2.350 / 11.029 · 21 % · 16,1 de 74,7 GB · ~14 min");
+        assert_eq!(v.linea2, "Van a «Eliminado recientemente» · el PC no se toca");
+        assert_eq!(v.tono, TonoLiberar::Activo);
+        assert!((v.fraccion.unwrap() - 2350.0 / 11029.0).abs() < 1e-9);
+        assert_eq!(texto_bandeja_liberar(&p, 1_000_005).unwrap(), "Liberando iCloud: 2.350 de 11.029 borrados (21 %) · ~14 min");
+        let con_fallos = ProgresoLiberar { fallidos: 12, ..p.clone() };
+        assert_eq!(vista_liberar(&con_fallos, 1_000_005).unwrap().linea2, "12 no se pudieron borrar · se reintentarán");
+        // Sin noticias más de 2 min: interrumpido, y el tooltip deja de hablar de él.
+        let v = vista_liberar(&p, 1_000_000 + 600).unwrap();
+        assert_eq!((v.titulo.as_str(), v.subtitulo.as_str()), ("No se terminó de liberar espacio", "Se detuvo hace 10 min sin terminar"));
+        assert_eq!((v.linea.as_str(), v.tono), ("Borrados 2.350 de 11.029 · 16,1 GB", TonoLiberar::Problema));
+        assert_eq!(texto_bandeja_liberar(&p, 1_000_000 + 600), None);
+    }
+
+    #[test]
+    fn liberar_fases_previas() {
+        let mut p = liberar(FaseLiberar::Listando, 3_225, 19_570);
+        p.por_seg = None;
+        let v = vista_liberar(&p, 1_000_000).unwrap();
+        assert_eq!((v.subtitulo.as_str(), v.linea.as_str()), ("Consultando iCloud…", "3.225 de ~19.570 elementos"));
+        assert_eq!(v.linea2, "Se conservan los últimos 30 días y la Fototeca Compartida");
+        p.total = 0;
+        let v = vista_liberar(&p, 1_000_000).unwrap();
+        assert_eq!((v.fraccion, v.linea.as_str()), (None, "3.225 elementos vistos"));
+        assert_eq!(texto_bandeja_liberar(&p, 1_000_000).unwrap(), "Liberando iCloud: consultando… (3.225 vistos)");
+        let p = ProgresoLiberar { por_seg: None, ..liberar(FaseLiberar::Reverificando, 100, 400) };
+        let v = vista_liberar(&p, 1_000_000).unwrap();
+        assert_eq!((v.subtitulo.as_str(), v.linea.as_str()), ("Comprobando archivos en disco…", "100 / 400 · 25 % · 16,1 de 74,7 GB"));
+        let p = liberar(FaseLiberar::Confirmando, 0, 11_029);
+        let v = vista_liberar(&p, 1_000_000).unwrap();
+        assert_eq!((v.subtitulo.as_str(), v.linea.as_str()), ("Esperando tu confirmación…", "Listos para borrar: 11.029 elementos · 74,7 GB"));
+        assert_eq!(vista_liberar(&p, 1_000_000 + 600), None, "consola cerrada sin confirmar");
+    }
+
+    #[test]
+    fn liberar_resumen_final_un_dia() {
+        let mut p = liberar(FaseLiberar::Terminado, 11_029, 11_029);
+        p.bytes_hechos = 74_700_000_000;
+        p.por_seg = None;
+        let v = vista_liberar(&p, 1_000_000 + 5 * 60).unwrap();
+        assert_eq!((v.titulo.as_str(), v.subtitulo.as_str()), ("Espacio liberado en iCloud", "Terminado hace 5 min"));
+        assert_eq!(v.linea, "Liberados 74,7 GB (11.029 elementos)");
+        assert_eq!(v.linea2, "Vacía «Eliminado recientemente» para recuperarlo");
+        assert_eq!((v.fraccion, v.tono), (Some(1.0), TonoLiberar::Hecho));
+        assert_eq!(texto_bandeja_liberar(&p, 1_000_000 + 5 * 60), None);
+        p.fallidos = 3;
+        assert_eq!(vista_liberar(&p, 1_000_000 + 5 * 60).unwrap().subtitulo, "Terminado hace 5 min · 3 no se pudieron borrar");
+        assert_eq!(vista_liberar(&p, 1_000_000 + 24 * 3600), None);
+        let f = ProgresoLiberar { fase: FaseLiberar::Fallido, borrados: 0, error: Some("sesión caducada".into()), ..p };
+        let v = vista_liberar(&f, 1_000_000 + 60).unwrap();
+        assert_eq!((v.subtitulo.as_str(), v.linea.as_str()), ("Falló hace 1 min: sesión caducada", "No se borró nada de iCloud"));
     }
 }

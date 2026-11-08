@@ -1,15 +1,29 @@
 //! Dibujo del panel de progreso en un mapa de bits en memoria: formas suavizadas pintadas a
 //! mano y texto con GDI (ClearType, Segoe UI). Lo usa la bandeja y `examples/panel_demo`.
 use crate::bandeja::icono::{self, APP};
-use crate::bandeja::panel::{Indicador, Vista};
+use crate::bandeja::panel::{Indicador, TonoLiberar, Vista};
 use windows_sys::Win32::Foundation::RECT;
 use windows_sys::Win32::Graphics::Gdi as gdi;
 
-/// Tamaño del panel en píxeles a 96 ppp.
+/// Tamaño del panel en píxeles a 96 ppp (sin la sección de liberar espacio).
 pub const ANCHO: i32 = 360;
 pub const ALTO: i32 = 372;
 const P: i32 = 16;
-const PIE: i32 = 308; // empieza el pie con los botones
+/// Alto del pie con los botones.
+const ALTO_PIE: i32 = 64;
+/// Tarjeta de liberar espacio: dónde empieza y cuánto mide, y cuánto crece el panel con ella.
+const LIBERAR_Y: i32 = 300;
+const LIBERAR_ALTO: i32 = 110;
+const EXTRA_LIBERAR: i32 = LIBERAR_ALTO + 8;
+
+/// Alto del panel (96 ppp) para esta vista: crece si hay sección de liberar espacio.
+pub fn alto(v: &Vista) -> i32 {
+    if v.liberar.is_some() {
+        ALTO + EXTRA_LIBERAR
+    } else {
+        ALTO
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Boton {
@@ -18,9 +32,10 @@ pub enum Boton {
 }
 
 /// Rectángulo (x, y, ancho, alto) de un botón, en píxeles a 96 ppp.
-pub fn rect_boton(b: Boton) -> (i32, i32, i32, i32) {
+/// `alto`: alto del panel a 96 ppp (ver [`alto`]).
+pub fn rect_boton(b: Boton, alto: i32) -> (i32, i32, i32, i32) {
     let w = (ANCHO - 2 * P - 8) / 2;
-    let y = PIE + (ALTO - PIE - 32) / 2;
+    let y = alto - ALTO_PIE + (ALTO_PIE - 32) / 2;
     match b {
         Boton::Pausa => (P, y, w, 32),
         Boton::Carpeta => (P + w + 8, y, w, 32),
@@ -28,9 +43,9 @@ pub fn rect_boton(b: Boton) -> (i32, i32, i32, i32) {
 }
 
 /// Botón bajo un punto en píxeles a 96 ppp.
-pub fn boton_en(x: f64, y: f64) -> Option<Boton> {
+pub fn boton_en(x: f64, y: f64, alto: i32) -> Option<Boton> {
     [Boton::Pausa, Boton::Carpeta].into_iter().find(|&b| {
-        let (bx, by, bw, bh) = rect_boton(b);
+        let (bx, by, bw, bh) = rect_boton(b, alto);
         x >= bx as f64 && x < (bx + bw) as f64 && y >= by as f64 && y < (by + bh) as f64
     })
 }
@@ -67,6 +82,8 @@ struct Paleta {
     gris: Rgb,
     naranja: Rgb,
     rojo: Rgb,
+    /// Acento de "liberar espacio" (borrar en iCloud): ámbar.
+    ambar: Rgb,
 }
 
 const CLARA: Paleta = Paleta {
@@ -89,6 +106,7 @@ const CLARA: Paleta = Paleta {
     gris: [138, 138, 138],
     naranja: [202, 92, 0],
     rojo: [196, 43, 28],
+    ambar: [160, 88, 0],
 };
 
 const OSCURA: Paleta = Paleta {
@@ -111,6 +129,7 @@ const OSCURA: Paleta = Paleta {
     gris: [150, 150, 150],
     naranja: [252, 160, 70],
     rojo: [255, 153, 164],
+    ambar: [255, 189, 66],
 };
 
 fn colorref(c: Rgb) -> u32 {
@@ -281,11 +300,13 @@ pub fn pintar(l: &mut Lienzo, v: &Vista, oscuro: bool, escala: f32, hover: Optio
     let p = if oscuro { &OSCURA } else { &CLARA };
     let e = |x: i32| x as f32 * escala;
     let (w, h) = (l.ancho as f32, l.alto as f32);
+    let alto_panel = alto(v);
+    let pie = alto_panel - ALTO_PIE;
 
     // Fondo, pie y su línea.
     l.caja(0.0, 0.0, w, h, 0.0, p.fondo, 1.0);
-    l.caja(0.0, e(PIE), w, h - e(PIE), 0.0, p.pie, 1.0);
-    l.caja(0.0, e(PIE), w, escala.round().max(1.0), 0.0, p.linea, 1.0);
+    l.caja(0.0, e(pie), w, h - e(pie), 0.0, p.pie, 1.0);
+    l.caja(0.0, e(pie), w, escala.round().max(1.0), 0.0, p.linea, 1.0);
 
     // Cabecera: icono, nombre e indicador.
     let lado = e(20).round() as i32;
@@ -337,9 +358,36 @@ pub fn pintar(l: &mut Lienzo, v: &Vista, oscuro: bool, escala: f32, hover: Optio
         l.caja(e(P + 12), tarjeta_y + e(2) + fila * i as f32, ancho_util - e(24), escala.round().max(1.0), 0.0, p.linea, 0.8);
     }
 
+    // Tarjeta de liberar espacio: misma tarjeta, barra con su propio color.
+    let color_liberar = v.liberar.as_ref().map(|lv| match lv.tono {
+        TonoLiberar::Activo => p.ambar,
+        TonoLiberar::Hecho => p.verde,
+        TonoLiberar::Problema => p.naranja,
+    });
+    let liberar_y = e(LIBERAR_Y);
+    let pad = e(14);
+    if let (Some(lv), Some(color)) = (&v.liberar, color_liberar) {
+        l.caja(e(P), liberar_y, ancho_util, e(LIBERAR_ALTO), e(8), p.borde_tarjeta, 1.0);
+        l.caja(e(P) + 1.0, liberar_y + 1.0, ancho_util - 2.0, e(LIBERAR_ALTO) - 2.0, e(8) - 1.0, p.tarjeta, 1.0);
+        let (bx, by, bw) = (e(P) + pad, liberar_y + e(56), ancho_util - 2.0 * pad);
+        l.caja(bx, by, bw, e(4), e(2), p.pista, 1.0);
+        match lv.fraccion {
+            Some(f) if f > 0.0 => l.caja(bx, by, (bw * f as f32).max(e(4)), e(4), e(2), color, 1.0),
+            Some(_) => {}
+            None => {
+                let tramo = bw * 0.3;
+                let x = bx - tramo + (bw + tramo) * pulso;
+                let (x0, x1) = (x.max(bx), (x + tramo).min(bx + bw));
+                if x1 > x0 {
+                    l.caja(x0, by, x1 - x0, e(4), e(2), color, 1.0);
+                }
+            }
+        }
+    }
+
     // Botones.
     for b in [Boton::Pausa, Boton::Carpeta] {
-        let (bx, by, bw, bh) = rect_boton(b);
+        let (bx, by, bw, bh) = rect_boton(b, alto_panel);
         let (fondo, borde) = match b {
             Boton::Pausa => (if hover == Some(b) { p.boton_acento_hover } else { p.boton_acento }, p.boton_acento),
             Boton::Carpeta => (if hover == Some(b) { p.boton_hover } else { p.boton }, p.borde_boton),
@@ -365,8 +413,15 @@ pub fn pintar(l: &mut Lienzo, v: &Vista, oscuro: bool, escala: f32, hover: Optio
         let ancho_nombre = ancho_texto(dc, &f_norm, nombre) + e(16);
         texto(dc, &f_norm, valor, p.texto, (x + ancho_nombre, y, ancho - ancho_nombre, fila), Alinear::Der);
     }
+    if let (Some(lv), Some(color)) = (&v.liberar, color_liberar) {
+        let (x, ancho) = (e(P) + pad, ancho_util - 2.0 * pad);
+        texto(dc, &f_nombre, &lv.titulo, p.texto, (x, liberar_y + e(10), ancho, e(20)), Alinear::Izq);
+        texto(dc, &f_peq, &lv.subtitulo, color, (x, liberar_y + e(30), ancho, e(18)), Alinear::Izq);
+        texto(dc, &f_peq, &lv.linea, p.texto, (x, liberar_y + e(66), ancho, e(18)), Alinear::Izq);
+        texto(dc, &f_peq, &lv.linea2, p.secundario, (x, liberar_y + e(84), ancho, e(18)), Alinear::Izq);
+    }
     for b in [Boton::Pausa, Boton::Carpeta] {
-        let (bx, by, bw, bh) = rect_boton(b);
+        let (bx, by, bw, bh) = rect_boton(b, alto_panel);
         let (rotulo, color) = match b {
             Boton::Pausa => (v.principal.texto(), p.texto_acento),
             Boton::Carpeta => ("Abrir carpeta", p.texto),
@@ -400,5 +455,29 @@ mod tests {
             assert!(contraste(p.texto_acento, p.boton_acento_hover) >= 4.5);
             assert!(contraste(p.texto, p.boton) >= 4.5);
         }
+    }
+
+    #[test]
+    fn la_fase_de_liberar_se_lee_sobre_la_tarjeta() {
+        for p in [&CLARA, &OSCURA] {
+            assert!(contraste(p.ambar, p.tarjeta) >= 4.5, "{:.2}", contraste(p.ambar, p.tarjeta));
+        }
+    }
+
+    #[test]
+    fn el_panel_crece_con_la_seccion_de_liberar_y_los_botones_bajan() {
+        use crate::bandeja::estado::{EstadoUi, Fase};
+        use crate::bandeja::panel::{vista, Medidas, TonoLiberar, VistaLiberar};
+        let mut v = vista(&EstadoUi::sin_datos(Fase::Inactiva), Medidas::default(), 0);
+        assert_eq!(alto(&v), ALTO);
+        let (_, y, _, _) = rect_boton(Boton::Pausa, alto(&v));
+        assert_eq!(boton_en(20.0, y as f64 + 1.0, alto(&v)), Some(Boton::Pausa));
+        v.liberar = Some(VistaLiberar { titulo: String::new(), subtitulo: String::new(), fraccion: None, linea: String::new(), linea2: String::new(), tono: TonoLiberar::Activo });
+        let a = alto(&v);
+        assert_eq!(a, ALTO + EXTRA_LIBERAR);
+        let (_, y2, _, h2) = rect_boton(Boton::Carpeta, a);
+        assert_eq!(y2, y + EXTRA_LIBERAR);
+        assert!(y2 + h2 <= a && y2 >= LIBERAR_Y + LIBERAR_ALTO, "los botones quedan en el pie, bajo la tarjeta");
+        assert_eq!(boton_en(20.0, y as f64 + 1.0, a), None);
     }
 }

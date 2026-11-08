@@ -1,5 +1,6 @@
 //! Liberar espacio: borrar de iCloud solo lo copiado, verificado y re-verificado.
 use crate::fuente::FuenteIcloud;
+use crate::progreso_liberar::{FaseLiberar, Seguimiento};
 use crate::registro::{Candidato, Registro};
 use crate::verificar;
 use anyhow::{anyhow, Result};
@@ -30,7 +31,26 @@ pub struct ResumenBorrado {
 }
 
 /// Requiere un listado completo reciente (`marca_lista`): solo propone lo que sigue en iCloud.
+/// Anota su avance en el registro (fase "reverificando" y, con algo que borrar, "confirmando").
 pub fn preparar(destino: &Path, registro: &Mutex<Registro>, mantener_dias: u32, ahora: i64, avance: &dyn Fn(usize, usize)) -> Result<PlanLiberar> {
+    let mut seg = Seguimiento::continuar(registro, Some(mantener_dias));
+    let r = preparar_con(destino, registro, mantener_dias, ahora, avance, &mut seg);
+    match &r {
+        Ok(plan) if plan.listos.is_empty() => seg.descartar(),
+        Ok(plan) => seg.fase(FaseLiberar::Confirmando, plan.listos.len() as u64, plan.bytes),
+        Err(e) => seg.fallar(&format!("{e:#}")),
+    }
+    r
+}
+
+fn preparar_con(
+    destino: &Path,
+    registro: &Mutex<Registro>,
+    mantener_dias: u32,
+    ahora: i64,
+    avance: &dyn Fn(usize, usize),
+    seg: &mut Seguimiento,
+) -> Result<PlanLiberar> {
     let c = {
         let reg = registro.lock().unwrap();
         let marca = reg.marca_lista()?.ok_or_else(|| anyhow!("No hay un listado completo de iCloud; no se puede liberar"))?;
@@ -38,8 +58,12 @@ pub fn preparar(destino: &Path, registro: &Mutex<Registro>, mantener_dias: u32, 
     };
     let candidatos = c.candidatos;
     let total = candidatos.len();
+    let bytes_total: u64 = candidatos.iter().flat_map(|c| &c.partes).map(|p| p.tamano).sum();
+    seg.fase(FaseLiberar::Reverificando, total as u64, bytes_total);
     let mut plan = PlanLiberar { listos: vec![], excluidos: vec![], no_verificados: c.no_verificados, no_liberables: c.no_liberables, bytes: 0, atipicos: 0 };
+    let mut revisados = 0u64;
     for (i, c) in candidatos.into_iter().enumerate() {
+        revisados += c.partes.iter().map(|p| p.tamano).sum::<u64>();
         match motivo_exclusion(destino, &c) {
             None => {
                 plan.bytes += c.partes.iter().map(|p| p.tamano).sum::<u64>();
@@ -48,6 +72,7 @@ pub fn preparar(destino: &Path, registro: &Mutex<Registro>, mantener_dias: u32, 
             }
             Some(m) => plan.excluidos.push((c, m)),
         }
+        seg.avance(i as u64 + 1, revisados);
         avance(i + 1, total);
     }
     Ok(plan)
@@ -64,13 +89,26 @@ fn motivo_exclusion(destino: &Path, c: &Candidato) -> Option<String> {
     None
 }
 
+/// Borra por lotes y anota el avance en el registro (fase "borrando" y, al final, "terminado";
+/// si iCloud falla, "fallido" con lo hecho hasta entonces).
 pub fn ejecutar(destino: &Path, registro: &Mutex<Registro>, fuente: &mut dyn FuenteIcloud, listos: &[Candidato], avance: &dyn Fn(usize, usize)) -> Result<ResumenBorrado> {
+    let mut seg = Seguimiento::continuar(registro, None);
+    let bytes_de = |c: &Candidato| c.partes.iter().map(|p| p.tamano).sum::<u64>();
+    seg.fase(FaseLiberar::Borrando, listos.len() as u64, listos.iter().map(bytes_de).sum());
     let csv = destino.join(".icopia").join("borrados.csv");
     let mut resumen = ResumenBorrado { borrados: 0, fallidos: vec![], errores: vec![] };
     let mut hechos = 0;
+    let mut bytes_borrados = 0u64;
     for lote in listos.chunks(TAMANO_LOTE) {
         let ids: Vec<String> = lote.iter().map(|c| c.asset_id.clone()).collect();
-        let r = fuente.borrar(&ids).map_err(|e| anyhow!("borrando en iCloud: {e}"))?;
+        let r = match fuente.borrar(&ids) {
+            Ok(r) => r,
+            Err(e) => {
+                let e = anyhow!("borrando en iCloud: {e}");
+                seg.fallar(&format!("{e:#}"));
+                return Err(e);
+            }
+        };
         let cuando = chrono::Local::now().to_rfc3339();
         // Ya está borrado en iCloud: se anota todo lo posible y un fallo al anotar no detiene el resto.
         for id in &r.borrados {
@@ -82,11 +120,15 @@ pub fn ejecutar(destino: &Path, registro: &Mutex<Registro>, fuente: &mut dyn Fue
                 resumen.errores.push((id.clone(), format!("no se pudo anotar en el registro: {e:#}")));
             }
             resumen.borrados += 1;
+            bytes_borrados += bytes_de(c);
         }
         resumen.fallidos.extend(r.fallidos);
         hechos += lote.len();
+        seg.contar(resumen.borrados as u64, resumen.fallidos.len() as u64);
+        seg.avance(hechos as u64, bytes_borrados);
         avance(hechos, listos.len());
     }
+    seg.terminar();
     Ok(resumen)
 }
 

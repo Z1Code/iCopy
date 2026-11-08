@@ -142,3 +142,39 @@ fn un_fallo_al_anotar_no_detiene_el_borrado_ni_pierde_registros() {
     let otra = liberar::preparar(e.dir.path(), &e.reg, 30, motor::ahora(), &|_, _| {}).unwrap();
     assert!(otra.listos.is_empty(), "lo borrado queda anotado en el registro");
 }
+
+#[test]
+fn el_avance_queda_en_el_registro_por_fases() {
+    use icopia::progreso_liberar::{self, FaseLiberar};
+    let mut e = escenario();
+    let fases = std::cell::RefCell::new(Vec::new());
+    let fase_actual = |reg: &Mutex<Registro>| progreso_liberar::leer(&reg.lock().unwrap()).map(|p| p.fase);
+    let plan = liberar::preparar(e.dir.path(), &e.reg, 30, motor::ahora(), &|_, _| fases.borrow_mut().push(fase_actual(&e.reg))).unwrap();
+    let p = progreso_liberar::leer(&e.reg.lock().unwrap()).unwrap();
+    assert_eq!((p.fase, p.total, p.bytes_total, p.dias), (FaseLiberar::Confirmando, 2, plan.bytes, 30));
+    let reg = &e.reg;
+    let r = liberar::ejecutar(e.dir.path(), reg, &mut e.fuente, &plan.listos, &|_, _| fases.borrow_mut().push(fase_actual(reg))).unwrap();
+    assert_eq!(r.borrados, 2);
+    let fases = fases.into_inner();
+    assert!(fases.contains(&Some(FaseLiberar::Reverificando)), "{fases:?}");
+    assert!(fases.contains(&Some(FaseLiberar::Borrando)), "{fases:?}");
+    let p = progreso_liberar::leer(&e.reg.lock().unwrap()).unwrap();
+    assert_eq!((p.fase, p.hechos, p.total, p.borrados, p.fallidos, p.bytes_hechos), (FaseLiberar::Terminado, 2, 2, 2, 0, plan.bytes));
+    assert!(p.inicio_unix <= p.actualizado_unix);
+    // Un liberar nuevo sin nada que borrar no deja nada que mostrar.
+    let otra = liberar::preparar(e.dir.path(), &e.reg, 30, motor::ahora(), &|_, _| {}).unwrap();
+    assert!(otra.listos.is_empty());
+    assert_eq!(progreso_liberar::leer(&e.reg.lock().unwrap()), None);
+}
+
+#[test]
+fn un_error_de_icloud_deja_el_avance_como_fallido() {
+    use icopia::progreso_liberar::{self, FaseLiberar};
+    let mut e = escenario();
+    let plan = liberar::preparar(e.dir.path(), &e.reg, 30, motor::ahora(), &|_, _| {}).unwrap();
+    e.fuente.sesion_caducada = true;
+    assert!(liberar::ejecutar(e.dir.path(), &e.reg, &mut e.fuente, &plan.listos, &|_, _| {}).is_err());
+    let p = progreso_liberar::leer(&e.reg.lock().unwrap()).unwrap();
+    assert_eq!((p.fase, p.borrados), (FaseLiberar::Fallido, 0));
+    assert!(p.error.unwrap().contains("borrando en iCloud"));
+}

@@ -253,6 +253,24 @@ impl Registro {
         Ok(())
     }
 
+    /// Valor libre en la tabla `meta` (una sentencia: transacción corta, compatible con otros procesos en WAL).
+    pub fn guardar_meta(&mut self, clave: &str, valor: &str) -> Result<()> {
+        self.con.execute(
+            "INSERT INTO meta(clave, valor) VALUES(?1, ?2) ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor",
+            params![clave, valor],
+        )?;
+        Ok(())
+    }
+
+    pub fn leer_meta(&self, clave: &str) -> Result<Option<String>> {
+        Ok(self.con.query_row("SELECT valor FROM meta WHERE clave = ?1", params![clave], |r| r.get(0)).optional()?)
+    }
+
+    pub fn borrar_meta(&mut self, clave: &str) -> Result<()> {
+        self.con.execute("DELETE FROM meta WHERE clave = ?1", params![clave])?;
+        Ok(())
+    }
+
     pub fn marca_lista(&self) -> Result<Option<i64>> {
         let v: Option<String> = self
             .con
@@ -878,6 +896,17 @@ mod tests {
         dar_por_copiado(&mut r, "A1", Original);
         r.marcar_para_redescarga("A1", Original, "x").unwrap();
         assert_eq!(r.partes_pendientes(1000, None).unwrap()[0].sha_pendiente, None);
+    }
+
+    #[test]
+    fn meta_guardar_leer_y_borrar() {
+        let mut r = Registro::en_memoria().unwrap();
+        assert_eq!(r.leer_meta("x").unwrap(), None);
+        r.guardar_meta("x", "1").unwrap();
+        r.guardar_meta("x", "2").unwrap();
+        assert_eq!(r.leer_meta("x").unwrap().as_deref(), Some("2"));
+        r.borrar_meta("x").unwrap();
+        assert_eq!(r.leer_meta("x").unwrap(), None);
     }
 
     #[test]
