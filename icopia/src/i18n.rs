@@ -295,7 +295,8 @@ textos! {
     AvActListaManual => "iCopy {v} está lista. Menú del icono → Reiniciar y actualizar.", "iCopy {v} is ready. Icon menu → Restart and update.";
     AvActAlDia => "Tienes la última versión ({v}).", "You have the latest version ({v}).";
     AvActError => "No se pudo buscar la actualización: {e}", "Couldn't check for updates: {e}";
-    AvActLiberando => "Se actualizará al terminar de liberar espacio.", "It will update after freeing up space finishes.";
+    AvActFalloInstalar => "No se pudo instalar iCopy {v}. La copia sigue con la versión actual.", "Couldn't install iCopy {v}. Copying continues with the current version.";
+    AvActLiberando =>"Se actualizará al terminar de liberar espacio.", "It will update after freeing up space finishes.";
     AvRestaurados =>"Restaurados {n} elementos en iCloud", "Restored {n} items in iCloud";
     // Inicio de sesión
     LogVentana => "Iniciar sesión · icopia", "Sign in · icopia";

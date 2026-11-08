@@ -168,17 +168,19 @@ pub fn momento_tranquilo(m: Momento) -> bool {
     !m.copiando && !m.pausado && !m.liberando && !m.ventana_abierta
 }
 
-/// Lanza el instalador en silencio; quien llama debe cerrar la app justo después
-/// (el instalador cierra lo que quede, reemplaza y vuelve a abrir iCopy).
-pub fn aplicar(paquete: &Path) -> Result<()> {
+/// Lanza el instalador en silencio (con su log junto al paquete) y devuelve su proceso. Quien llama
+/// NO debe cerrarse: el instalador cierra iCopy, reemplaza los archivos y la vuelve a abrir. Si el
+/// instalador termina con error, la app sigue viva y puede avisar.
+pub fn aplicar(paquete: &Path) -> Result<std::process::Child> {
     if !cfg!(windows) {
         bail!("actualizar aún no está disponible en este sistema");
     }
+    let log = paquete.with_file_name("instalacion.log");
     std::process::Command::new(paquete)
         .args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-"])
+        .arg(format!("/LOG={}", log.display()))
         .spawn()
-        .with_context(|| format!("no pude lanzar {}", paquete.display()))?;
-    Ok(())
+        .with_context(|| format!("no pude lanzar {}", paquete.display()))
 }
 
 /// Las compilaciones de desarrollo (debug o ejecutadas desde `target\`) no se actualizan solas,

@@ -31,6 +31,8 @@ enum Ev {
     /// Lectura fresca del registro: totales (solo con el panel abierto) y avance de "liberar espacio".
     Lectura { progreso: Option<icopia::registro::Progreso>, liberar: Option<ProgresoLiberar> },
     Actualizacion(EventoActualizacion),
+    /// El instalador terminó (código de salida). Si fue bien, normalmente ya nos habrá cerrado.
+    InstaladorTermino(Option<i32>),
 }
 
 /// Procesos hijos con ventana propia abiertos ahora (la de inicio de sesión): una actualización
@@ -247,6 +249,10 @@ fn main() {
     let mut avisada: Option<String> = None;
     let mut instalar_ahora: Option<std::path::PathBuf> = None;
     let mut fallo_al_instalar = false;
+    // Instalador en marcha: `Some(estaba_pausado)` para dejar la copia como estaba si falla.
+    let mut instalando: Option<bool> = None;
+    let mut salir_tras_instalar = false;
+    let proxy_instalador = event_loop.create_proxy();
     let mut ultimo_chequeo_act = Instant::now();
     // Abre (o trae al frente) el asistente de liberar espacio con el inventario actual del registro.
     let abrir_asistente = |asistente: &mut Option<VentanaAsistente>, destino_ev: &tao::event_loop::EventLoopWindowTarget<Ev>, liberar: &Option<ProgresoLiberar>| {
@@ -415,9 +421,24 @@ fn main() {
                         avisada = Some(version);
                     }
                 }
-                EventoActualizacion::AlDia => avisos::mostrar(t(T::AvActTitulo), &tf(T::AvActAlDia, &[("v", &actualizar::VERSION)])),
+                EventoActualizacion::AlDia if instalando.is_some() => {}
+                EventoActualizacion::AlDia =>avisos::mostrar(t(T::AvActTitulo), &tf(T::AvActAlDia, &[("v", &actualizar::VERSION)])),
                 EventoActualizacion::Error(e) => avisos::mostrar(t(T::AvActTitulo), &tf(T::AvActError, &[("e", &e)])),
             },
+            Event::UserEvent(Ev::InstaladorTermino(codigo)) => {
+                let estaba_pausado = instalando.take().unwrap_or(false);
+                if codigo == Some(0) {
+                    // Fue bien pero seguimos vivos (no debería pasar: el instalador nos cierra): salir.
+                    salir_tras_instalar = true;
+                } else {
+                    if !estaba_pausado {
+                        let _ = tx.send(Orden::Reanudar);
+                    }
+                    fallo_al_instalar = true;
+                    let v = pendiente.as_ref().map(|p| p.0.clone()).unwrap_or_default();
+                    avisos::mostrar(t(T::AvActTitulo), &tf(T::AvActFalloInstalar, &[("v", &v)]));
+                }
+            }
             Event::UserEvent(Ev::Ui(EventoUi::Aviso { titulo, texto })) => avisos::mostrar(&titulo, &texto),
             Event::UserEvent(Ev::Ui(EventoUi::Liberar(e))) => {
                 if let Some(a) = asistente.as_mut() {
@@ -578,6 +599,7 @@ fn main() {
             } else if id == *i_buscar.id() {
                 match &pendiente {
                     // Ya descargada y verificada: instalar (la copia, si la hay, se reanuda sola después)...
+                    Some(_) if instalando.is_some() => {}
                     Some((_, paquete)) => {
                         if hilo_actualizar::liberando(liberar.as_ref(), chrono::Utc::now().timestamp()) {
                             // ...salvo mientras se borra en iCloud.
@@ -598,7 +620,7 @@ fn main() {
             }
         }
         // Instalación automática: solo cuando no hay nada en marcha ni ventanas abiertas.
-        if instalar_ahora.is_none() && !fallo_al_instalar && ultimo_chequeo_act.elapsed() >= Duration::from_secs(5) {
+        if instalar_ahora.is_none() && instalando.is_none() && !fallo_al_instalar && ultimo_chequeo_act.elapsed() >= Duration::from_secs(5) {
             ultimo_chequeo_act = Instant::now();
             if let Some((_, paquete)) = &pendiente {
                 if Config::cargar().map(|c| c.actualizar_auto).unwrap_or(true) {
@@ -616,19 +638,35 @@ fn main() {
             }
         }
         if let Some(paquete) = instalar_ahora.take() {
+            // La copia se pausa (como al abrir el login) y la app NO se cierra: el instalador la cierra,
+            // reemplaza los archivos y la vuelve a abrir. Si falla, seguimos vivos, se reanuda y se avisa.
+            if !pausado {
+                let _ = tx.send(Orden::Pausar);
+                cancelar.store(true, Ordering::SeqCst);
+            }
             match actualizar::aplicar(&paquete) {
-                // El instalador cierra lo que quede, reemplaza los archivos y vuelve a abrir iCopy.
-                Ok(()) => {
-                    cancelar.store(true, Ordering::SeqCst);
-                    let _ = tx.send(Orden::Salir);
-                    tray.take();
-                    *control_flow = ControlFlow::Exit;
+                Ok(mut hijo) => {
+                    instalando = Some(pausado);
+                    let proxy = proxy_instalador.clone();
+                    std::thread::spawn(move || {
+                        let codigo = hijo.wait().ok().and_then(|s| s.code());
+                        let _ = proxy.send_event(Ev::InstaladorTermino(codigo));
+                    });
                 }
                 Err(e) => {
+                    if !pausado {
+                        let _ = tx.send(Orden::Reanudar);
+                    }
                     fallo_al_instalar = true;
                     avisos::mostrar(t(T::AvActTitulo), &tf(T::AvActError, &[("e", &format!("{e:#}"))]));
                 }
             }
+        }
+        if salir_tras_instalar {
+            cancelar.store(true, Ordering::SeqCst);
+            let _ = tx.send(Orden::Salir);
+            tray.take();
+            *control_flow = ControlFlow::Exit;
         }
     });
 }
