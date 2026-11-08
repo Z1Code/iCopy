@@ -14,3 +14,4 @@ config.json
 sesion/
 borrados.csv
 docs/social/_panel_*.png
+dist/
