@@ -650,3 +650,126 @@ def test_puente_sin_borrador_inyectado_usa_lotes():
     assert p._borrador_lote is not None
     p2 = pi.Puente("yo@x.com", "c", fabrica=lambda _pw: ApiFalsa(), borrador=lambda l, a: None)
     assert p2._borrador_lote is None
+
+
+# --- Sesión: errores pasajeros de Apple y escrituras a medias no deben pedir volver a entrar ---
+
+def _error_421():
+    from pyicloud_ipd.exceptions import PyiCloudAPIResponseException
+    return PyiCloudAPIResponseException("Authentication required for Account.", "421")
+
+
+class ApiQueFallaUnaVez(ApiFalsa):
+    """Las fotos dan 421 hasta que se vuelve a autenticar con el token guardado."""
+
+    def __init__(self, fallos=1, autentica_bien=True):
+        super().__init__()
+        self.fallos = fallos
+        self.autentica_bien = autentica_bien
+        self.autenticaciones = 0
+        lib = type("Lib", (), {"all": [AssetFalso(id="A1", versiones={
+            AssetVersionSize.ORIGINAL: V(10, "https://u/1", "public.heic")})]})()
+        self._libs = {"PrimarySync": lib}
+
+    def authenticate(self):
+        self.autenticaciones += 1
+        if not self.autentica_bien:
+            raise PyiCloudFailedLoginException("token inválido")
+
+    @property
+    def photos(self):
+        if self.fallos > 0:
+            self.fallos -= 1
+            raise _error_421()
+        return type("Fotos", (), {"private_libraries": self._libs})()
+
+
+def test_421_pasajero_reautentica_con_el_token_y_reintenta(salida):
+    api = ApiQueFallaUnaVez()
+    creadas = []
+    p = pi.Puente("yo@x.com", "c", fabrica=lambda _pw: creadas.append(1) or api)
+    p.manejar({"cmd": "listar"})
+    assert api.autenticaciones == 1 and len(creadas) == 1
+    assert lineas(salida)[-1] == {"ok": True, "total": 1, "omitidos": 0}
+
+
+def test_421_persistente_sigue_siendo_error_de_sesion(salida):
+    from pyicloud_ipd.exceptions import PyiCloudAPIResponseException
+    api = ApiQueFallaUnaVez(fallos=5)
+    p = pi.Puente("yo@x.com", "c", fabrica=lambda _pw: api)
+    with pytest.raises(PyiCloudAPIResponseException) as e:
+        p.manejar({"cmd": "listar"})
+    assert pi.es_error_de_sesion(e.value) and api.autenticaciones == 1, "un solo reintento"
+
+
+def test_421_con_token_caducado_es_sesion_caducada(salida):
+    p = pi.Puente("yo@x.com", "c", fabrica=lambda _pw: ApiQueFallaUnaVez(autentica_bien=False))
+    with pytest.raises(pi.SesionCaducada):
+        p.manejar({"cmd": "listar"})
+
+
+def test_no_reintenta_si_ya_emitio_algo(salida, monkeypatch):
+    from pyicloud_ipd.exceptions import PyiCloudAPIResponseException
+    api = ApiQueFallaUnaVez(fallos=0)
+    p = pi.Puente("yo@x.com", "c", fabrica=lambda _pw: api)
+
+    def a_medias():
+        pi.responder({"asset": {"id": "A1"}})
+        raise _error_421()
+
+    monkeypatch.setattr(p, "listar", a_medias)
+    with pytest.raises(PyiCloudAPIResponseException):
+        p.manejar({"cmd": "listar"})
+    assert api.autenticaciones == 0, "repetir duplicaría lo ya emitido"
+
+
+def test_sesion_rechazada_un_instante_se_reintenta_antes_de_pedir_login(salida):
+    intentos = []
+
+    def fabrica(_pw):
+        intentos.append(1)
+        if len(intentos) == 1:
+            raise PyiCloudFailedLoginException("validate devolvió 421")
+        return ApiFalsa()
+
+    p = pi.Puente("yo@x.com", "c", fabrica=fabrica)
+    p._esperar = lambda s: None
+    p.manejar({"cmd": "sesion"})
+    assert len(intentos) == 2 and lineas(salida) == [{"ok": True}]
+
+
+def test_escritura_de_sesion_a_medias_no_destruye_la_anterior(tmp_path):
+    ruta = tmp_path / "cuenta.session"
+    ruta.write_text('{"session_token": "bueno"}', encoding="utf-8")
+    with pytest.raises(RuntimeError):
+        with pi.abrir_sesion(str(ruta), "w", encoding="utf-8") as f:
+            f.write('{"sess')
+            raise RuntimeError("el proceso muere a mitad")
+    assert json.loads(ruta.read_text(encoding="utf-8")) == {"session_token": "bueno"}
+    assert list(tmp_path.iterdir()) == [ruta], "sin temporales sueltos"
+    with pi.abrir_sesion(str(ruta), "w", encoding="utf-8") as f:
+        json.dump({"session_token": "nuevo"}, f)
+    assert json.loads(ruta.read_text(encoding="utf-8")) == {"session_token": "nuevo"}
+
+
+def test_cookies_se_guardan_de_forma_atomica(tmp_path):
+    import http.cookiejar
+    ruta = tmp_path / "cuenta"
+    tarro = pi.TarroAtomico(filename=str(ruta))
+    tarro.set_cookie(http.cookiejar.Cookie(0, "X-APPLE-WEBAUTH-TOKEN", "v", None, False, ".icloud.com", True, True,
+                                           "/", True, True, None, False, None, None, {}))
+    tarro.save(ignore_discard=True, ignore_expires=True)
+    otro = http.cookiejar.LWPCookieJar(filename=str(ruta))
+    otro.load(ignore_discard=True, ignore_expires=True)
+    assert [c.name for c in otro] == ["X-APPLE-WEBAUTH-TOKEN"]
+    assert list(tmp_path.iterdir()) == [ruta]
+
+
+def test_escrituras_atomicas_se_aplican_a_pyicloud(monkeypatch):
+    import http.cookiejar
+    import pyicloud_ipd.session as sesion_mod
+    monkeypatch.setattr(http.cookiejar, "LWPCookieJar", http.cookiejar.LWPCookieJar)
+    monkeypatch.setattr(sesion_mod, "open", open, raising=False)
+    pi.activar_escrituras_atomicas()
+    assert sesion_mod.open is pi.abrir_sesion
+    assert http.cookiejar.LWPCookieJar is pi.TarroAtomico

@@ -20,11 +20,14 @@ y vuelve con ese mismo error, para reintentarlo más tarde; "reintentar" = TRY_A
 from __future__ import annotations
 
 import argparse
+import contextlib
+import http.cookiejar
 import io
 import json
 import logging
 import os
 import sys
+import time
 import traceback
 import urllib.parse
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -41,6 +44,10 @@ from tzlocal import get_localzone
 BIBLIOTECA_PERSONAL = "PrimarySync"
 
 _salida: Any = None  # se fija en main(); las pruebas lo sustituyen
+_emitidas = 0  # líneas escritas al protocolo: un comando solo se repite si aún no emitió nada
+
+# Comandos que se repiten una vez si Apple pide autenticarse de nuevo (p. ej. 421 justo tras el login).
+REINTENTABLES = ("sesion", "listar", "refrescar")
 
 
 class SesionCaducada(Exception):
@@ -52,8 +59,68 @@ class Credenciales(Exception):
 
 
 def responder(obj: Dict[str, Any]) -> None:
+    global _emitidas
     _salida.write(json.dumps(obj) + "\n")
     _salida.flush()
+    _emitidas += 1
+
+
+# --- Escrituras atómicas de la sesión ---
+# pyicloud_ipd reescribe el archivo de sesión y las cookies en CADA petición, vaciándolos primero.
+# Si el proceso muere a mitad (pausa, cancelación, apagado, corte de luz), la sesión queda vacía o
+# rota y hay que volver a iniciar sesión. Se escribe a un temporal y se sustituye de golpe.
+
+def _reemplazar(tmp: str, ruta: str) -> None:
+    # En Windows, os.replace falla si otro proceso tiene el archivo abierto en ese instante.
+    for intento in range(10):
+        try:
+            os.replace(tmp, ruta)
+            return
+        except PermissionError:
+            if intento == 9:
+                logging.warning("No pude actualizar %s (ocupado); se conserva la versión anterior", ruta)
+                return
+            time.sleep(0.05)
+
+
+@contextlib.contextmanager
+def _escribir_atomico(ruta: str, encoding: str) -> Any:
+    tmp = f"{ruta}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w", encoding=encoding) as f:
+            yield f
+            f.flush()
+            os.fsync(f.fileno())
+        _reemplazar(tmp, ruta)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def abrir_sesion(ruta: str, modo: str = "r", *args: Any, **kwargs: Any) -> Any:
+    """Sustituye a `open` dentro de pyicloud_ipd.session: escrituras atómicas, lecturas normales."""
+    if "w" in modo:
+        return _escribir_atomico(ruta, kwargs.get("encoding") or "utf-8")
+    return open(ruta, modo, *args, **kwargs)
+
+
+class TarroAtomico(http.cookiejar.LWPCookieJar):
+    def save(self, filename: Optional[str] = None, ignore_discard: bool = False,
+             ignore_expires: bool = False) -> None:
+        ruta = filename or self.filename
+        tmp = f"{ruta}.{os.getpid()}.tmp"
+        try:
+            super().save(tmp, ignore_discard, ignore_expires)
+            _reemplazar(tmp, ruta)
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+
+
+def activar_escrituras_atomicas() -> None:
+    import pyicloud_ipd.session as sesion_mod
+    sesion_mod.open = abrir_sesion  # type: ignore[attr-defined]
+    http.cookiejar.LWPCookieJar = TarroAtomico  # type: ignore[misc]
 
 
 def extension_de(uti: str, nombre: str) -> str:
@@ -319,6 +386,7 @@ class Puente:
         self.cookies = cookies
         self.dominio = dominio
         self.api: Any = None
+        self._esperar: Callable[[float], None] = time.sleep
         self.cache: Dict[str, Tuple[str, Any, Any]] = {}
         self._fabrica = fabrica or self._fabrica_real
         self._borrador = borrador or borrar_en_icloud
@@ -345,7 +413,14 @@ class Puente:
 
     def api_lista(self) -> Any:
         if self.api is None:
-            api = self.conectar()
+            try:
+                api = self.conectar()
+            except SesionCaducada:
+                # Apple a veces rechaza un instante la validación de una sesión buena: se confirma
+                # con un segundo intento antes de pedir a la persona que vuelva a entrar.
+                logging.warning("La sesión no se validó; reintento antes de darla por caducada")
+                self._esperar(3)
+                api = self.conectar()
             if api.requires_2fa or api.requires_2sa:
                 raise SesionCaducada()
             self.api = api
@@ -359,7 +434,31 @@ class Puente:
             libs.insert(0, (BIBLIOTECA_PERSONAL, fotos))
         return libs
 
+    def _reautenticar(self) -> None:
+        """Renueva la sesión con el token guardado (sin contraseña), sobre el mismo objeto."""
+        if self.api is None:
+            raise SesionCaducada()
+        try:
+            self.api.authenticate()
+        except PyiCloudFailedLoginException as e:
+            raise SesionCaducada() from e
+        if self.api.requires_2fa or self.api.requires_2sa:
+            raise SesionCaducada()
+
     def manejar(self, p: Dict[str, Any]) -> None:
+        if p.get("cmd") not in REINTENTABLES:
+            return self._manejar(p)
+        antes = _emitidas
+        try:
+            self._manejar(p)
+        except PyiCloudAPIResponseException as e:
+            if not es_error_de_sesion(e) or _emitidas != antes or self.api is None:
+                raise
+            logging.warning("Apple pide autenticarse de nuevo (%s): renuevo la sesión y reintento", e)
+            self._reautenticar()
+            self._manejar(p)
+
+    def _manejar(self, p: Dict[str, Any]) -> None:
         cmd = p.get("cmd")
         if cmd == "sesion":
             self.api_lista()
@@ -604,6 +703,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     sys.stdout = sys.stderr  # nada de la librería puede ensuciar el protocolo
     logging.basicConfig(stream=sys.stderr, level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
+    activar_escrituras_atomicas()
     puente = Puente(args.apple_id, args.cookies, dominio=args.dominio)
     for linea in io.TextIOWrapper(sys.stdin.buffer, encoding="utf-8"):
         linea = linea.strip()
