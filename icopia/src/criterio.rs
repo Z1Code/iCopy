@@ -44,6 +44,35 @@ impl Criterio {
     }
 }
 
+/// "2011-2019,2021,2023-2025" → esos años (rangos con guion, ambos incluidos).
+pub fn parsear_anios(texto: &str) -> Result<BTreeSet<i32>, String> {
+    let mut v = BTreeSet::new();
+    for trozo in texto.split(',').map(str::trim).filter(|x| !x.is_empty()) {
+        let num = |x: &str| x.trim().parse::<i32>().ok().filter(|a| (1900..=2200).contains(a)).ok_or_else(|| format!("año no válido: «{x}»"));
+        match trozo.split_once('-') {
+            Some((a, b)) => {
+                let (a, b) = (num(a)?, num(b)?);
+                if a > b {
+                    return Err(format!("rango al revés: «{trozo}»"));
+                }
+                v.extend(a..=b);
+            }
+            None => {
+                v.insert(num(trozo)?);
+            }
+        }
+    }
+    if v.is_empty() {
+        return Err("no hay ningún año".into());
+    }
+    Ok(v)
+}
+
+/// Todos los años de captura hasta `anio` incluido (para `--hasta-anio`).
+pub fn hasta_anio(anio: i32) -> BTreeSet<i32> {
+    (1900..=anio).collect()
+}
+
 /// Un elemento de iCloud según el registro (último listado, aún no borrado).
 #[derive(Debug, Clone, PartialEq)]
 pub struct FilaInventario {
@@ -169,6 +198,22 @@ mod tests {
             bytes: 10,
             atipico: false,
         }
+    }
+
+    #[test]
+    fn anios_en_texto_con_rangos() {
+        assert_eq!(parsear_anios("2011-2013, 2021,2023-2024").unwrap().into_iter().collect::<Vec<_>>(), vec![2011, 2012, 2013, 2021, 2023, 2024]);
+        assert!(parsear_anios("2019-2011").is_err());
+        assert!(parsear_anios("abc").is_err());
+        assert!(parsear_anios(" , ").is_err());
+        let h = hasta_anio(2025);
+        assert!(h.contains(&1990) && h.contains(&2025) && !h.contains(&2026));
+        // Corte exacto por año local de captura: lo del 31 de diciembre de 2025 entra, lo del 1 de enero de 2026 no.
+        let mut ultima = fila(2025, 400);
+        ultima.fecha_unix = AHORA - 300 * DIA;
+        let primera = fila(2026, 299);
+        let s = seleccionar(&[ultima, primera], &Criterio::Anios(h), AHORA);
+        assert_eq!(s.elementos, 1);
     }
 
     #[test]

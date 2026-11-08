@@ -28,7 +28,7 @@ Uso:
   icopia copiar [--mes AAAA-MM]  Copia y verifica lo que falte
   icopia estado                  Resumen de lo copiado
   icopia verificar               Vuelve a comprobar todo lo copiado
-  icopia liberar [--dias N | --anios 2019,2020]
+  icopia liberar [--dias N | --anios 2011-2019,2021 | --hasta-anio 2025]
                                  Borra de iCloud lo ya copiado y verificado (pide confirmación;
                                  siempre conserva al menos los últimos 30 días)
   icopia restaurar --ultima | --sesion ID
@@ -331,10 +331,11 @@ fn cmd_restaurar(args: &[String]) -> Result<()> {
 fn cmd_liberar(args: &[String]) -> Result<()> {
     let cfg = Config::cargar()?;
     let destino = destino_de(&cfg)?;
-    let criterio = match (opcion(args, "--anios"), opcion(args, "--dias")) {
-        (Some(a), _) => Criterio::Anios(a.split(',').map(|x| x.trim().parse().context("--anios: años separados por comas")).collect::<Result<_>>()?),
-        (None, Some(d)) => Criterio::ConservarDias(d.parse().context("--dias debe ser un número")?),
-        (None, None) => Criterio::ConservarDias(cfg.mantener_dias),
+    let criterio = match (opcion(args, "--anios"), opcion(args, "--hasta-anio"), opcion(args, "--dias")) {
+        (Some(a), _, _) => Criterio::Anios(icopia::criterio::parsear_anios(a).map_err(|e| anyhow!("--anios: {e}"))?),
+        (None, Some(h), _) => Criterio::Anios(icopia::criterio::hasta_anio(h.trim().parse().context("--hasta-anio: un año, p. ej. 2025")?)),
+        (None, None, Some(d)) => Criterio::ConservarDias(d.parse().context("--dias debe ser un número")?),
+        (None, None, None) => Criterio::ConservarDias(cfg.mantener_dias),
     };
     let dir_datos = destino.join(".icopia");
     let _cerrojo = match cerrojo::intentar(&dir_datos)? {
@@ -410,7 +411,12 @@ fn liberar_con_registro(cfg: &Config, destino: &Path, registro: &Mutex<Registro>
         println!("De ellos, {} con estructura atípica (confirmadas por doble descarga)", plan.atipicos);
     }
     if let Some(a) = criterio.anios() {
-        println!("Años elegidos: {}", a.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", "));
+        let (min, max) = (a.first().copied().unwrap_or_default(), a.last().copied().unwrap_or_default());
+        if a.len() as i32 == max - min + 1 && min <= 1900 {
+            println!("Años de captura elegidos: hasta {max} incluido");
+        } else {
+            println!("Años de captura elegidos: {}", a.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", "));
+        }
     }
     println!("Se conservan en iCloud los últimos {dias} días y todo lo de la Fototeca Compartida.");
     if plan.no_verificados > 0 {

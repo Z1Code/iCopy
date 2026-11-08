@@ -58,6 +58,9 @@ pub struct ProgresoLiberar {
     /// Identificador de la liberación (para restaurarla).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sesion: Option<String>,
+    /// Apple pidió esperar: se reanuda a esta hora (unix).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub espera_hasta: Option<i64>,
 }
 
 /// Cómo debe mostrarse ahora un avance guardado.
@@ -89,6 +92,7 @@ impl ProgresoLiberar {
             en_pausa: false,
             cancelado: false,
             sesion: None,
+            espera_hasta: None,
         }
     }
 
@@ -249,6 +253,21 @@ impl<'a> Seguimiento<'a> {
             self.p.por_seg = None;
             self.ritmo.reiniciar();
         }
+        self.escribir();
+    }
+
+    /// Apple pidió esperar hasta `hasta` (unix); 0 = ya no se espera. Se anota siempre.
+    pub fn esperar_apple(&mut self, hasta: i64) {
+        self.p.espera_hasta = (hasta > 0).then_some(hasta);
+        if hasta > 0 {
+            self.p.por_seg = None;
+            self.ritmo.reiniciar();
+        }
+        self.escribir();
+    }
+
+    /// Solo renueva la hora (latido durante una espera larga).
+    pub fn latir(&mut self) {
         self.escribir();
     }
 

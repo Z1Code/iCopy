@@ -59,6 +59,12 @@ pub struct FuenteFalsa {
     pub refrescos: Vec<Vec<String>>,
     /// "Eliminado recientemente": lo borrado, que se puede restaurar.
     pub papelera: Vec<AssetIcloud>,
+    /// Llamadas a `borrar` (desde 0) en las que Apple "pide esperar": todo el lote vuelve con `limite_apple`.
+    pub frenar_llamadas: Vec<u32>,
+    /// Ids que la primera vez responden "reintentar" (TRY_AGAIN_LATER) y luego se borran.
+    pub ocupados_una_vez: Vec<String>,
+    /// Cuántas veces se llamó a `borrar`.
+    pub llamadas_borrar: u32,
 }
 
 /// Cambia el parámetro `e=` (caducidad) de un enlace.
@@ -122,9 +128,18 @@ impl FuenteIcloud for FuenteFalsa {
         if self.sesion_caducada {
             return Err(ErrorFuente::SesionCaducada);
         }
+        let llamada = self.llamadas_borrar;
+        self.llamadas_borrar += 1;
         let mut r = ResultadoBorrado::default();
+        if self.frenar_llamadas.contains(&llamada) {
+            r.fallidos = ids.iter().map(|i| (i.clone(), "limite_apple".into())).collect();
+            return Ok(r);
+        }
         for id in ids {
-            if self.rechazar.contains(id) {
+            if let Some(k) = self.ocupados_una_vez.iter().position(|x| x == id) {
+                self.ocupados_una_vez.remove(k);
+                r.fallidos.push((id.clone(), "reintentar".into()));
+            } else if self.rechazar.contains(id) {
                 r.fallidos.push((id.clone(), "reintentar".into()));
             } else {
                 self.borrados.push(id.clone());

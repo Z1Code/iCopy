@@ -76,8 +76,8 @@ fn los_rechazados_no_se_marcan() {
     let mut e = escenario();
     e.fuente.rechazar = vec!["V1".into()];
     let plan = liberar::preparar(e.dir.path(), &e.reg, 30, motor::ahora(), &|_, _| {}).unwrap();
-    // Aquí V2 no se altera: listos = [V1, V2]; V1 es rechazada por iCloud y V2 se borra.
-    let r = liberar::ejecutar(e.dir.path(), &e.reg, &mut e.fuente, &plan.listos, &|_, _| {}).unwrap();
+    // Aquí V2 no se altera: listos = [V1, V2]; V1 es rechazada por iCloud (tras sus reintentos) y V2 se borra.
+    let r = liberar::ejecutar_con(e.dir.path(), &e.reg, &mut e.fuente, &plan.listos, &|_, _| {}, &rapido()).unwrap();
     assert_eq!((r.borrados, r.fallidos.len()), (1, 1));
     let de_nuevo = liberar::preparar(e.dir.path(), &e.reg, 30, motor::ahora(), &|_, _| {}).unwrap();
     assert!(de_nuevo.listos.iter().any(|c| c.asset_id == "V1"));
@@ -241,4 +241,61 @@ fn cancelar_y_pausar_entre_lotes() {
     reanudar.join().unwrap();
     assert!(inicio.elapsed() >= std::time::Duration::from_millis(350));
     assert_eq!((r.borrados, r.cancelado), (2, false));
+}
+
+fn rapido() -> liberar::ControlBorrado {
+    liberar::ControlBorrado { politica: liberar::Politica::rapida(), ..Default::default() }
+}
+
+/// Muchos assets viejos ya copiados (sin servidor: se dan por verificados en el registro y en disco).
+fn muchos(n: usize) -> (tempfile::TempDir, Mutex<Registro>, FuenteFalsa, Vec<icopia::registro::Candidato>) {
+    let dir = tempfile::tempdir().unwrap();
+    let datos = jpeg(64);
+    let s = servidor(vec![("/x", Comportamiento::Servir(datos.clone()))]);
+    let assets: Vec<_> = (0..n)
+        .map(|i| asset(&format!("A{i:03}"), &format!("IMG_{i:03}"), "2024-01-10T10:00:00-05:00", "PrimarySync", vec![parte(TipoParte::Original, &datos, s.url("/x"), "JPG")]))
+        .collect();
+    let mut fuente = FuenteFalsa { assets, renovar: true, ..Default::default() };
+    let reg = Mutex::new(Registro::en_memoria().unwrap());
+    let op = OpcionesRonda { concurrencia: 4, mes: None };
+    motor::ejecutar_ronda(dir.path(), &reg, &mut fuente, &descarga::cliente(), &op, &AtomicBool::new(false), &|_: Avance| {}).unwrap();
+    let plan = liberar::preparar(dir.path(), &reg, 30, motor::ahora(), &|_, _| {}).unwrap();
+    assert_eq!(plan.listos.len(), n);
+    (dir, reg, fuente, plan.listos)
+}
+
+#[test]
+fn si_apple_pide_esperar_se_espera_y_se_reintenta_el_mismo_lote() {
+    use icopia::progreso_liberar;
+    let (dir, reg, mut fuente, listos) = muchos(120);
+    // Frena la 2.ª y la 3.ª llamada (el segundo lote, dos veces seguidas).
+    fuente.frenar_llamadas = vec![1, 2];
+    let r = liberar::ejecutar_con(dir.path(), &reg, &mut fuente, &listos, &|_, _| {}, &rapido()).unwrap();
+    assert_eq!((r.borrados, r.fallidos.len()), (120, 0), "nada falla por el frenazo: {:?}", r.fallidos);
+    assert_eq!(fuente.llamadas_borrar, 5, "3 lotes + 2 reintentos del segundo");
+    let p = progreso_liberar::leer(&reg.lock().unwrap()).unwrap();
+    assert_eq!((p.borrados, p.espera_hasta), (120, None));
+}
+
+#[test]
+fn si_apple_no_deja_nunca_se_para_sin_dar_por_fallidos_a_los_elementos_por_su_culpa() {
+    let (dir, reg, mut fuente, listos) = muchos(120);
+    fuente.frenar_llamadas = (1..100).collect();
+    let r = liberar::ejecutar_con(dir.path(), &reg, &mut fuente, &listos, &|_, _| {}, &rapido()).unwrap();
+    assert_eq!(r.borrados, 50);
+    assert_eq!(r.fallidos.len(), 70);
+    assert!(r.fallidos.iter().all(|(_, m)| m == liberar::LIMITE_APPLE));
+    assert_eq!(fuente.llamadas_borrar, 1 + 1 + liberar::Politica::rapida().max_esperas, "se rinde tras los frenazos seguidos permitidos");
+    // Lo no borrado sigue propuesto para la próxima vez.
+    assert_eq!(liberar::preparar(dir.path(), &reg, 30, motor::ahora(), &|_, _| {}).unwrap().listos.len(), 70);
+}
+
+#[test]
+fn try_again_later_se_reintenta_al_final_con_datos_frescos() {
+    let (dir, reg, mut fuente, listos) = muchos(60);
+    fuente.ocupados_una_vez = vec!["A003".into(), "A055".into()];
+    let r = liberar::ejecutar_con(dir.path(), &reg, &mut fuente, &listos, &|_, _| {}, &rapido()).unwrap();
+    assert_eq!((r.borrados, r.fallidos.len()), (60, 0));
+    assert_eq!(fuente.refrescos, vec![vec!["A003".to_string(), "A055".to_string()]], "se piden datos frescos antes de reintentar");
+    assert_eq!(&fuente.borrados[58..], ["A003", "A055"]);
 }

@@ -14,6 +14,8 @@ Peticiones:
   {"cmd":"refrescar","ids":[...]}        -> {"asset":{...}}* {"ok":true,"total":N,"faltan":[...]}
      (enlaces nuevos para ids del último listado; "faltan": no listados, borrados o sin original)
 Errores: {"ok":false,"error":"sesion_caducada"|"credenciales"|"otro","detalle":"..."}
+En borrar/restaurar, "limite_apple" = Apple pide esperar (HTTP 503): el resto del lote no se intenta
+y vuelve con ese mismo error, para reintentarlo más tarde; "reintentar" = TRY_AGAIN_LATER de un elemento.
 """
 from __future__ import annotations
 
@@ -29,7 +31,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from pyicloud_ipd.asset_version import ITEM_TYPE_EXTENSIONS, AssetVersion
 from pyicloud_ipd.base import PyiCloudService
-from pyicloud_ipd.exceptions import PyiCloudAPIResponseException, PyiCloudFailedLoginException
+from pyicloud_ipd.exceptions import (PyiCloudAPIResponseException, PyiCloudFailedLoginException,
+                                     PyiCloudServiceUnavailableException)
 from pyicloud_ipd.item_type import AssetItemType
 from pyicloud_ipd.services.photos import PhotoAlbum, PhotoAsset, filename_with_fallback
 from pyicloud_ipd.version_size import AssetVersionSize, LivePhotoVersionSize
@@ -183,6 +186,8 @@ def marcar_borrado(lib: Any, asset: Any, valor: int) -> Optional[str]:
         if e.code == "TRY_AGAIN_LATER":
             return "reintentar"
         raise
+    if getattr(respuesta, "status_code", None) in (429, 503):
+        return "limite_apple"
     # Solo cuenta como borrado si iCloud confirma explícitamente ESE registro sin error.
     estado = getattr(respuesta, "status_code", None)
     if getattr(respuesta, "ok", True) is False or (isinstance(estado, int) and estado >= 400):
@@ -198,7 +203,9 @@ def marcar_borrado(lib: Any, asset: Any, valor: int) -> Optional[str]:
     for registro in registros:
         if isinstance(registro, dict) and registro.get("recordName") == nombre:
             if "serverErrorCode" in registro:
-                return str(registro["serverErrorCode"])
+                codigo = str(registro["serverErrorCode"])
+                # Op-Lock de CloudKit u otro "inténtalo luego": se reintenta más tarde en la misma liberación.
+                return "reintentar" if codigo in ("TRY_AGAIN_LATER", "CONFLICT", "OPLOCK_FAILURE") else codigo
             return None
     return "respuesta_desconocida"
 
@@ -234,6 +241,14 @@ def _registro_valido(registro: Optional[Dict[str, Any]]) -> bool:
         return False
     campos = _campos(registro)
     return not any((campos.get(c) or {}).get("value") for c in ("isDeleted", "isExpunged"))
+
+
+def es_limite_de_apple(e: Exception) -> bool:
+    """Apple frena por exceso de peticiones (p. ej. tras miles de borrados): hay que esperar."""
+    if isinstance(e, PyiCloudServiceUnavailableException):
+        return True
+    codigo = str(getattr(e, "code", "") or "")
+    return codigo in ("503", "429") or "temporary refusing" in str(e)
 
 
 def es_error_de_sesion(e: Exception) -> bool:
@@ -401,9 +416,13 @@ class Puente:
         borrados: List[str] = []
         fallidos: List[Dict[str, str]] = []
         sesion_caducada = False
+        parado: Optional[str] = None
         for i in ids:
             if sesion_caducada:
                 fallidos.append({"id": i, "error": "sesion_caducada"})
+                continue
+            if parado:
+                fallidos.append({"id": i, "error": parado})
                 continue
             entrada = self.cache.get(i)
             if entrada is None:
@@ -415,6 +434,8 @@ class Puente:
                 continue
             error = _aplicar(self._borrador, lib, asset)
             sesion_caducada = error == "sesion_caducada"
+            if error == "limite_apple":
+                parado = error
             if error:
                 fallidos.append({"id": i, "error": error})
             else:
@@ -433,8 +454,9 @@ class Puente:
         fallidos: List[Dict[str, str]] = []
         lib = next(l for n, l in self.bibliotecas() if n == BIBLIOTECA_PERSONAL)
         sesion_caducada = False
+        limite = False
         for asset in self.papelera(lib):
-            if not pendientes or sesion_caducada:
+            if not pendientes or sesion_caducada or limite:
                 break
             i = asset.id
             if i not in pendientes:
@@ -442,11 +464,12 @@ class Puente:
             del pendientes[i]
             error = _aplicar(self._restaurador, lib, asset)
             sesion_caducada = error == "sesion_caducada"
+            limite = error == "limite_apple"
             if error:
                 fallidos.append({"id": i, "error": error})
             else:
                 restaurados.append(i)
-        motivo = "sesion_caducada" if sesion_caducada else "no_en_eliminado_recientemente"
+        motivo = "sesion_caducada" if sesion_caducada else "limite_apple" if limite else "no_en_eliminado_recientemente"
         fallidos += [{"id": i, "error": motivo} for i in pendientes]
         responder({"ok": True, "restaurados": restaurados, "fallidos": fallidos})
 
@@ -456,6 +479,9 @@ def _aplicar(funcion: Callable[[Any, Any], Optional[str]], lib: Any, asset: Any)
     try:
         return funcion(lib, asset)
     except Exception as e:  # noqa: BLE001
+        if es_limite_de_apple(e):
+            logging.warning("Apple pide esperar: %s", e)
+            return "limite_apple"
         if isinstance(e, SesionCaducada) or (
                 isinstance(e, PyiCloudAPIResponseException) and es_error_de_sesion(e)):
             return "sesion_caducada"

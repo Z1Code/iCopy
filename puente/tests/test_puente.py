@@ -305,8 +305,30 @@ def test_borrar_en_icloud_respuestas_dudosas_no_cuentan():
 
 
 def test_borrar_en_icloud_devuelve_el_error_del_servidor():
+    r, _ = _borrar_con(Respuesta({"records": [{"recordName": "A1", "serverErrorCode": "ACCESS_DENIED"}]}))
+    assert r == "ACCESS_DENIED"
+    # Op-Lock y similares: se reintenta más tarde.
     r, _ = _borrar_con(Respuesta({"records": [{"recordName": "A1", "serverErrorCode": "CONFLICT"}]}))
-    assert r == "CONFLICT"
+    assert r == "reintentar"
+    r, _ = _borrar_con(Respuesta({"records": [{"recordName": "A1"}]}, status_code=503))
+    assert r == "limite_apple"
+
+
+def test_borrar_ante_el_limite_de_apple_para_el_lote(salida):
+    from pyicloud_ipd.exceptions import PyiCloudServiceUnavailableException
+    intentados = []
+
+    def borrador(lib, a):
+        intentados.append(a.id)
+        if a.id == "A2":
+            raise PyiCloudServiceUnavailableException("Apple iCloud is temporary refusing to serve icloudpd")
+
+    p = _puente_con_cache(borrador, ["A1", "A2", "A3"])
+    p.manejar({"cmd": "borrar", "ids": ["A1", "A2", "A3"]})
+    assert intentados == ["A1", "A2"], "no se insiste con el resto del lote"
+    assert lineas(salida) == [{"ok": True, "borrados": ["A1"],
+                               "fallidos": [{"id": "A2", "error": "limite_apple"},
+                                            {"id": "A3", "error": "limite_apple"}]}]
 
 
 def _puente_con_cache(borrador, ids):
@@ -538,11 +560,11 @@ def _puente_con_papelera(papelera, restaurador):
 def test_restaurar_busca_en_eliminado_recientemente(salida):
     hechos = []
     papelera = [AssetFalso(id=i) for i in ["X1", "A1", "A2", "A3"]]
-    p = _puente_con_papelera(papelera, lambda lib, a: hechos.append((lib, a.id)) or ("CONFLICT" if a.id == "A2" else None))
+    p = _puente_con_papelera(papelera, lambda lib, a: hechos.append((lib, a.id)) or ("ACCESS_DENIED" if a.id == "A2" else None))
     p.manejar({"cmd": "restaurar", "ids": ["A1", "A2", "ZZ"]})
     assert hechos == [("lib", "A1"), ("lib", "A2")], "solo los pedidos, en la biblioteca personal"
     assert lineas(salida) == [{"ok": True, "restaurados": ["A1"],
-                               "fallidos": [{"id": "A2", "error": "CONFLICT"},
+                               "fallidos": [{"id": "A2", "error": "ACCESS_DENIED"},
                                             {"id": "ZZ", "error": "no_en_eliminado_recientemente"}]}]
 
 

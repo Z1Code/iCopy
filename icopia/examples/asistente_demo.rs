@@ -1,7 +1,7 @@
 //! Renderiza el asistente "Liberar espacio en iCloud" con datos de ejemplo (ninguno real) a un
 //! PNG, para revisarlo sin la bandeja. Uso:
 //! `cargo run --example asistente_demo -- salida.png [escala] [oscuro|claro] [paso] [es|en]`
-//! con paso = elegir | anios | revisando | revisado | confirmar | manteniendo | enmarcha | resultado.
+//! con paso = elegir | anios | revisando | revisado | confirmar | manteniendo | enmarcha | esperando | resultado.
 use icopia::bandeja::asistente::{Accion, Asistente, Control, EventoLiberar, Paso, ResumenFinal, ResumenPlan};
 use icopia::bandeja::asistente_gdi;
 use icopia::bandeja::panel_gdi::Lienzo;
@@ -92,7 +92,7 @@ fn main() {
                 a.progreso = Some(progreso(FaseLiberar::Reverificando, 4_120, 11_031, 27_900_000_000, 74_710_000_000));
                 a.foco = None;
             }
-            "revisado" | "confirmar" | "manteniendo" | "enmarcha" | "resultado" => {
+            "revisado" | "confirmar" | "manteniendo" | "enmarcha" | "esperando" | "resultado" => {
                 a.activar(Control::Primario);
                 a.evento(EventoLiberar::Plan(plan));
                 a.foco = None;
@@ -100,16 +100,23 @@ fn main() {
                     a.activar(Control::Primario);
                     a.foco = None;
                 }
-                if paso == "manteniendo" || paso == "enmarcha" || paso == "resultado" {
+                if paso != "revisado" && paso != "confirmar" {
                     a.activar(Control::Entendido);
                     a.pulsar_mantener(0.0);
                     t = 1.2;
                     a.foco = Some(Control::Mantener);
                 }
-                if paso == "enmarcha" || paso == "resultado" {
+                if paso == "enmarcha" || paso == "esperando" || paso == "resultado" {
                     assert_eq!(a.tick(2.0), Some(Accion::Ejecutar));
                     a.progreso = Some(progreso(FaseLiberar::Borrando, 2_350, 11_029, 16_100_000_000, 74_700_000_000));
                     a.foco = None;
+                }
+                if paso == "esperando" {
+                    // Apple frenó los borrados: se espera y se reanuda solo.
+                    let mut p = progreso(FaseLiberar::Borrando, 9_800, 11_029, 66_300_000_000, 74_700_000_000);
+                    p.espera_hasta = Some(ahora + 4 * 60);
+                    p.por_seg = None;
+                    a.progreso = Some(p);
                 }
                 if paso == "resultado" {
                     a.evento(EventoLiberar::Terminado(ResumenFinal {

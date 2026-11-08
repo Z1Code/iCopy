@@ -219,6 +219,8 @@ textos! {
     LibComprobando => "Comprobando archivos en disco…", "Checking files on disk…";
     LibBorrando => "Borrando en iCloud…", "Deleting from iCloud…";
     LibPausa => "En pausa", "Paused";
+    LibEsperaApple => "Apple pidió esperar · reanudando en {d}", "Apple asked to wait · resuming in {d}";
+    LibEsperaAppleYa => "Apple pidió esperar · reanudando…", "Apple asked to wait · resuming…";
     LibEsperando => "Esperando tu confirmación…", "Waiting for your confirmation…";
     LibTerminado => "Terminado {hace}", "Finished {hace}";
     LibNoBorrados => " · {n} no se pudieron borrar", " · {n} couldn't be deleted";
@@ -244,6 +246,7 @@ textos! {
     TipConsultando => "Liberando iCloud: consultando… ({n} vistos)", "Freeing iCloud: checking… ({n} seen)";
     TipComprobando => "Liberando iCloud: comprobando {h} de {t}", "Freeing iCloud: checking {h} of {t}";
     TipBorrando => "Liberando iCloud: {h} de {t} borrados ({p} %){eta}", "Freeing iCloud: {h} of {t} deleted ({p} %){eta}";
+    TipEsperaApple => "Liberando iCloud: Apple pidió esperar ({h} de {t})", "Freeing iCloud: Apple asked to wait ({h} of {t})";
     TipEnPausa => "Liberando iCloud: en pausa ({h} de {t})", "Freeing iCloud: paused ({h} of {t})";
     // Estado (menú y tooltip)
     EstAlDia => "Al día — {p}", "Up to date — {p}";

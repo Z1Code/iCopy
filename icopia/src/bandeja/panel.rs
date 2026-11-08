@@ -314,7 +314,8 @@ fn pct(p: &ProgresoLiberar) -> u64 {
 /// Sección del panel para un liberar guardado en el registro; `None` si no hay nada que mostrar.
 pub fn vista_liberar(p: &ProgresoLiberar, ahora_unix: i64) -> Option<VistaLiberar> {
     let sit = p.situacion(ahora_unix)?;
-    let eta = p.restante_seg().filter(|_| !p.en_pausa).map(|s| format!(" · {}", duracion(s))).unwrap_or_default();
+    let espera_apple = p.espera_hasta.filter(|_| p.fase == FaseLiberar::Borrando);
+    let eta = p.restante_seg().filter(|_| !p.en_pausa && espera_apple.is_none()).map(|s| format!(" · {}", duracion(s))).unwrap_or_default();
     let cuando = hace(ahora_unix - p.actualizado_unix);
     let v = match sit {
         Situacion::EnCurso => {
@@ -340,7 +341,12 @@ pub fn vista_liberar(p: &ProgresoLiberar, ahora_unix: i64) -> Option<VistaLibera
                 FaseLiberar::Borrando => t(T::LibVanAPapelera).into(),
                 _ => tf(T::LibConserva, &[("d", &p.dias)]),
             };
-            VistaLiberar { titulo: t(T::LibTitulo).into(), subtitulo: t(subtitulo).into(), fraccion, linea, linea2, tono: TonoLiberar::Activo }
+            let subtitulo = match espera_apple {
+                Some(h) if h > ahora_unix => tf(T::LibEsperaApple, &[("d", &duracion((h - ahora_unix) as u64))]),
+                Some(_) => t(T::LibEsperaAppleYa).into(),
+                None => t(subtitulo).into(),
+            };
+            VistaLiberar { titulo: t(T::LibTitulo).into(), subtitulo, fraccion, linea, linea2, tono: TonoLiberar::Activo }
         }
         Situacion::Confirmando => VistaLiberar {
             titulo: t(T::LibTitulo).into(),
@@ -405,6 +411,7 @@ pub fn texto_bandeja_liberar(p: &ProgresoLiberar, ahora_unix: i64) -> Option<Str
         (Situacion::EnCurso, FaseLiberar::Listando) => tf(T::TipConsultando, &[("n", &h)]),
         (Situacion::EnCurso, FaseLiberar::Reverificando) => tf(T::TipComprobando, &[("h", &h), ("t", &total)]),
         (Situacion::EnCurso, _) if p.en_pausa => tf(T::TipEnPausa, &[("h", &h), ("t", &total)]),
+        (Situacion::EnCurso, _) if p.espera_hasta.is_some() => tf(T::TipEsperaApple, &[("h", &h), ("t", &total)]),
         (Situacion::EnCurso, _) => {
             let eta = p.restante_seg().map(|s| format!(" · {}", duracion(s))).unwrap_or_default();
             tf(T::TipBorrando, &[("h", &h), ("t", &total), ("p", &pct(p)), ("eta", &eta)])
@@ -791,6 +798,11 @@ mod tests {
         assert_eq!((v.titulo.as_str(), v.subtitulo.as_str()), ("No se terminó de liberar espacio", "Se detuvo hace 10 min sin terminar"));
         assert_eq!((v.linea.as_str(), v.tono), ("Borrados 2.350 de 11.029 · 16,1 GB", TonoLiberar::Problema));
         assert_eq!(texto_bandeja_liberar(&p, 1_000_000 + 600), None);
+        // Apple pidió esperar: cuenta atrás y sin tiempo restante.
+        let espera = ProgresoLiberar { espera_hasta: Some(1_000_005 + 150), ..p.clone() };
+        let v = vista_liberar(&espera, 1_000_005).unwrap();
+        assert_eq!((v.subtitulo.as_str(), v.linea.as_str()), ("Apple pidió esperar · reanudando en ~3 min", "2.350 / 11.029 · 21 % · 16,1 de 74,7 GB"));
+        assert_eq!(texto_bandeja_liberar(&espera, 1_000_005).unwrap(), "Liberando iCloud: Apple pidió esperar (2.350 de 11.029)");
         // En pausa: sin tiempo restante.
         let pausa = ProgresoLiberar { en_pausa: true, ..p.clone() };
         let v = vista_liberar(&pausa, 1_000_005).unwrap();
