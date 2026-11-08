@@ -47,7 +47,34 @@ pub fn elegir(json: &Value, actual: &Version) -> Option<Publicacion> {
             .as_str()
             .map(String::from)
     };
-    Some(Publicacion { url_paquete: url(&nombre)?, url_firma: url(&format!("{nombre}.sig"))?, nombre, version })
+    Some(Publicacion { url_paquete: url(&nombre)?, url_firma: url(&format!("{nombre}.sig2"))?, nombre, version })
+}
+
+/// Firma v2 (`.sig2`): cubre también el nombre del paquete, que lleva la versión y el sistema. Así no
+/// se puede servir un instalador antiguo auténtico (ni el de otro sistema) como si fuera el nuevo.
+/// La v1 (`.sig`, solo los bytes) se sigue publicando para que las 0.2.0 instaladas puedan actualizarse.
+const CONTEXTO_V2: &[u8] = b"iCopy-paquete-v2\0";
+
+fn mensaje_v2(nombre: &str, datos: &[u8]) -> Vec<u8> {
+    let mut m = Vec::with_capacity(CONTEXTO_V2.len() + nombre.len() + 1 + datos.len());
+    m.extend_from_slice(CONTEXTO_V2);
+    m.extend_from_slice(nombre.as_bytes());
+    m.push(0);
+    m.extend_from_slice(datos);
+    m
+}
+
+pub fn firmar_paquete(semilla_b64: &str, nombre: &str, datos: &[u8]) -> Result<String> {
+    firmar(semilla_b64, &mensaje_v2(nombre, datos))
+}
+
+pub fn firma_paquete_valida(datos: &[u8], nombre: &str, firma_b64: &str, clave_publica_b64: &str) -> bool {
+    firma_valida(&mensaje_v2(nombre, datos), firma_b64, clave_publica_b64)
+}
+
+/// Clave pública de las actualizaciones incluida en la app (base64).
+pub fn clave_publica() -> &'static str {
+    CLAVE_PUBLICA
 }
 
 fn semilla(semilla_b64: &str) -> Result<SigningKey> {
@@ -93,16 +120,32 @@ pub fn consultar(http: &Client) -> Result<Option<Publicacion>> {
 /// Descarga paquete y firma a `dir`. El paquete solo queda en disco (con su nombre final) si la
 /// firma es válida; si no, error y nada que instalar. Borra descargas anteriores de esa carpeta.
 pub fn descargar(http: &Client, p: &Publicacion, dir: &Path) -> Result<PathBuf> {
-    descargar_con_clave(http, p, dir, CLAVE_PUBLICA)
+    descargar_con(http, p, dir, CLAVE_PUBLICA, MAX_PAQUETE)
 }
 
+/// Tamaño máximo de un paquete (el instalador pesa unos 25 MB): un servidor hostil no puede agotar la memoria.
+pub const MAX_PAQUETE: u64 = 300 * 1024 * 1024;
+
 pub fn descargar_con_clave(http: &Client, p: &Publicacion, dir: &Path, clave_publica_b64: &str) -> Result<PathBuf> {
+    descargar_con(http, p, dir, clave_publica_b64, MAX_PAQUETE)
+}
+
+pub fn descargar_con(http: &Client, p: &Publicacion, dir: &Path, clave_publica_b64: &str, max_bytes: u64) -> Result<PathBuf> {
+    use std::io::Read;
     let _ = std::fs::remove_dir_all(dir);
     std::fs::create_dir_all(dir)?;
     let pedir = |url: &str| http.get(url).header(USER_AGENT, format!("iCopy/{VERSION}")).send()?.error_for_status();
     let firma = pedir(&p.url_firma)?.text()?;
-    let datos = pedir(&p.url_paquete)?.bytes()?;
-    if !firma_valida(&datos, &firma, clave_publica_b64) {
+    let respuesta = pedir(&p.url_paquete)?;
+    if respuesta.content_length().is_some_and(|n| n > max_bytes) {
+        bail!("{} es demasiado grande: no se descarga", p.nombre);
+    }
+    let mut datos = Vec::new();
+    respuesta.take(max_bytes + 1).read_to_end(&mut datos)?;
+    if datos.len() as u64 > max_bytes {
+        bail!("{} es demasiado grande: no se instala", p.nombre);
+    }
+    if !firma_paquete_valida(&datos, &p.nombre, &firma, clave_publica_b64) {
         bail!("la firma de {} no es válida: no se instala", p.nombre);
     }
     let destino = dir.join(&p.nombre);
@@ -168,11 +211,11 @@ mod pruebas {
 
     #[test]
     fn elige_solo_si_es_mas_nueva_y_trae_paquete_y_firma() {
-        let r = release("v0.3.0", &["iCopy-Setup-0.3.0.exe", "iCopy-Setup-0.3.0.exe.sig"]);
+        let r = release("v0.3.0", &["iCopy-Setup-0.3.0.exe", "iCopy-Setup-0.3.0.exe.sig2"]);
         let p = elegir(&r, &v("0.2.0")).unwrap();
         assert_eq!(p.version, v("0.3.0"));
         assert_eq!(p.url_paquete, "https://x/iCopy-Setup-0.3.0.exe");
-        assert_eq!(p.url_firma, "https://x/iCopy-Setup-0.3.0.exe.sig");
+        assert_eq!(p.url_firma, "https://x/iCopy-Setup-0.3.0.exe.sig2");
         assert!(elegir(&r, &v("0.3.0")).is_none(), "misma versión");
         assert!(elegir(&r, &v("0.4.0")).is_none(), "nunca baja de versión");
     }
@@ -200,6 +243,32 @@ mod pruebas {
         let mut s = [0u8; 32];
         getrandom::getrandom(&mut s).unwrap();
         STANDARD.encode(s)
+    }
+
+    #[test]
+    fn firma_v2_liga_nombre() {
+        let privada = clave_de_prueba();
+        let publica = clave_publica_de(&privada).unwrap();
+        let firma = firmar_paquete(&privada, "iCopy-Setup-0.3.0.exe", b"x").unwrap();
+        assert!(firma_paquete_valida(b"x", "iCopy-Setup-0.3.0.exe", &firma, &publica));
+        assert!(!firma_paquete_valida(b"x", "iCopy-Setup-0.2.0.exe", &firma, &publica), "otro nombre");
+        assert!(!firma_paquete_valida(b"y", "iCopy-Setup-0.3.0.exe", &firma, &publica), "otros bytes");
+    }
+
+    #[test]
+    fn firma_v1_no_vale_como_v2() {
+        let privada = clave_de_prueba();
+        let publica = clave_publica_de(&privada).unwrap();
+        let v1 = firmar(&privada, b"x").unwrap();
+        assert!(!firma_paquete_valida(b"x", "iCopy-Setup-0.3.0.exe", &v1, &publica));
+    }
+
+    #[test]
+    fn elegir_exige_sig2() {
+        let sin = release("v0.3.0", &["iCopy-Setup-0.3.0.exe", "iCopy-Setup-0.3.0.exe.sig"]);
+        assert!(elegir(&sin, &v("0.2.0")).is_none());
+        let con = release("v0.3.0", &["iCopy-Setup-0.3.0.exe", "iCopy-Setup-0.3.0.exe.sig", "iCopy-Setup-0.3.0.exe.sig2"]);
+        assert!(elegir(&con, &v("0.2.0")).unwrap().url_firma.ends_with(".sig2"));
     }
 
     #[test]

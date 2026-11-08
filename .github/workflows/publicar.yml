@@ -47,4 +47,4 @@ jobs:
         run: |
           $extra = @()
           if ("${{ github.ref_name }}" -match '-') { $extra += "--prerelease" }
-          gh release create "${{ github.ref_name }}" "dist\iCopy-Setup-$env:VERSION.exe" "dist\iCopy-Setup-$env:VERSION.exe.sig" --title "iCopy $env:VERSION" --notes-file notas.md @extra
+          gh release create "${{ github.ref_name }}" "dist\iCopy-Setup-$env:VERSION.exe" "dist\iCopy-Setup-$env:VERSION.exe.sig" "dist\iCopy-Setup-$env:VERSION.exe.sig2" --title "iCopy $env:VERSION" --notes-file notas.md @extra
