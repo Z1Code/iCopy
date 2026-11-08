@@ -5,6 +5,16 @@ numeración: [SemVer](https://semver.org/lang/es/).
 
 ## [Sin publicar]
 
+### Seguridad
+- Las actualizaciones llevan una firma v2 que cubre también el nombre del paquete (versión y sistema):
+  ya no se puede servir un instalador antiguo auténtico como si fuera nuevo. Se rechazan paquetes de
+  más de 300 MB.
+
+### Corregido
+- Si el instalador de una actualización falla, iCopy sigue abierta, reanuda la copia y avisa (antes se
+  cerraba hasta el siguiente inicio de sesión). El instalador deja un log para diagnosticar.
+- Rutas de las copias preparadas para macOS (en el registro siguen igual; los registros existentes valen).
+
 ## [0.2.0] - 2026-11-08
 
 ### Añadido
