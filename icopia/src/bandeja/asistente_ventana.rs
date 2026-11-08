@@ -31,6 +31,27 @@ fn hwnd(v: &Window) -> HWND {
     v.hwnd() as HWND
 }
 
+/// Iconos de la barra de título y de Alt+Tab/barra de tareas, del recurso del .exe, al tamaño
+/// exacto del DPI de la ventana (si no, Windows pone uno genérico).
+fn poner_iconos(v: HWND) {
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
+    use windows_sys::Win32::UI::WindowsAndMessaging as wm;
+    unsafe {
+        let dpi = GetDpiForWindow(v).max(96);
+        for (tipo, metrica) in [(wm::ICON_SMALL, wm::SM_CXSMICON), (wm::ICON_BIG, wm::SM_CXICON)] {
+            let lado = GetSystemMetricsForDpi(metrica, dpi);
+            let icono = wm::LoadImageW(GetModuleHandleW(std::ptr::null()), 1 as _, wm::IMAGE_ICON, lado, lado, 0);
+            if !icono.is_null() {
+                let viejo = wm::SendMessageW(v, wm::WM_SETICON, tipo as usize, icono as isize);
+                if viejo != 0 {
+                    wm::DestroyIcon(viejo as _);
+                }
+            }
+        }
+    }
+}
+
 impl VentanaAsistente {
     pub fn nueva<E>(destino: &EventLoopWindowTarget<E>, modelo: Asistente) -> VentanaAsistente {
         let ventana = WindowBuilder::new()
@@ -41,6 +62,7 @@ impl VentanaAsistente {
             .with_inner_size(LogicalSize::new(ANCHO as f64, ALTO as f64))
             .build(destino)
             .expect("ventana del asistente");
+        poner_iconos(hwnd(&ventana));
         VentanaAsistente { ventana, lienzo: None, escala: 1.0, oscuro: false, modelo, t0: Instant::now(), cursor: (-1.0, -1.0), mayus: false, tecla_mantener: None }
     }
 
@@ -175,6 +197,10 @@ impl VentanaAsistente {
     pub fn evento(&mut self, e: &WindowEvent) -> Option<Accion> {
         let accion = match e {
             WindowEvent::CloseRequested => Some(Accion::Cerrar),
+            WindowEvent::ScaleFactorChanged { .. } => {
+                poner_iconos(hwnd(&self.ventana));
+                None
+            }
             WindowEvent::Focused(false) => {
                 self.modelo.soltar_mantener();
                 self.tecla_mantener = None;
@@ -221,36 +247,42 @@ impl VentanaAsistente {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                // Por la tecla lógica: una flecha sin la marca de "extendida" (p. ej. enviada por
+                // otro programa) llega como tecla del teclado numérico.
+                use tao::keyboard::Key;
                 let tecla = event.physical_key;
-                match (event.state, tecla) {
-                    (ElementState::Released, k) if Some(k) == self.tecla_mantener => {
-                        self.tecla_mantener = None;
-                        self.modelo.soltar_mantener();
+                let pulsada = event.state == ElementState::Pressed;
+                let activar = matches!(event.logical_key, Key::Space | Key::Enter);
+                match &event.logical_key {
+                    _ if !pulsada => {
+                        if Some(tecla) == self.tecla_mantener {
+                            self.tecla_mantener = None;
+                            self.modelo.soltar_mantener();
+                        }
                         None
                     }
-                    (ElementState::Released, _) => None,
-                    (_, KeyCode::Tab) => {
+                    Key::Tab => {
                         self.modelo.mover_foco(self.mayus);
                         None
                     }
-                    (_, KeyCode::ArrowLeft) => {
+                    Key::ArrowLeft => {
                         self.modelo.flecha(-1, 0);
                         None
                     }
-                    (_, KeyCode::ArrowRight) => {
+                    Key::ArrowRight => {
                         self.modelo.flecha(1, 0);
                         None
                     }
-                    (_, KeyCode::ArrowUp) => {
+                    Key::ArrowUp => {
                         self.modelo.flecha(0, -1);
                         None
                     }
-                    (_, KeyCode::ArrowDown) => {
+                    Key::ArrowDown => {
                         self.modelo.flecha(0, 1);
                         None
                     }
-                    (_, KeyCode::Escape) if !event.repeat => Some(Accion::Cerrar),
-                    (_, KeyCode::Space | KeyCode::Enter | KeyCode::NumpadEnter) if self.modelo.foco == Some(Control::Mantener) => {
+                    Key::Escape if !event.repeat => Some(Accion::Cerrar),
+                    _ if activar && self.modelo.foco == Some(Control::Mantener) => {
                         if !event.repeat {
                             self.tecla_mantener = Some(tecla);
                             let t = self.segundos();
@@ -258,9 +290,10 @@ impl VentanaAsistente {
                         }
                         None
                     }
-                    (_, KeyCode::Space | KeyCode::Enter | KeyCode::NumpadEnter) if !event.repeat => {
+                    _ if activar && !event.repeat => {
                         // Intro sin foco: el botón principal del pie.
-                        let c = self.modelo.foco.or((tecla != KeyCode::Space).then_some(Control::Primario));
+                        let intro = event.logical_key == Key::Enter;
+                        let c = self.modelo.foco.or(intro.then_some(Control::Primario));
                         c.and_then(|c| self.activar(c))
                     }
                     _ => None,

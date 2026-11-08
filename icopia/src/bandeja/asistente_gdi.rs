@@ -52,10 +52,17 @@ pub fn pintar(l: &mut Lienzo, a: &Asistente, oscuro: bool, escala: f32, t_seg: f
     l.caja(0.0, e(PIE_Y), w, h - e(PIE_Y), 0.0, p.pie, 1.0);
     l.caja(0.0, e(PIE_Y), w, escala.round().max(1.0), 0.0, p.linea, 1.0);
 
-    // Pasos: círculo con número (o marca si ya pasó) y nombre.
-    let ancho_paso = (ANCHO - 2 * M) as f32 / 5.0;
+    // Pasos: círculo con número (o marca si ya pasó) y nombre, repartidos con el mismo hueco.
+    let fuente_paso = |paso: Paso| if paso == a.paso { &f.semi_peq } else { &f.peq };
+    let anchos: Vec<f32> = Paso::TODOS.iter().map(|&paso| e(26) + ancho_texto(l.dc(), fuente_paso(paso), paso.nombre())).collect();
+    let hueco = (ancho_util - anchos.iter().sum::<f32>()) / 4.0;
+    let xs: Vec<f32> = anchos.iter().scan(x0, |x, w| {
+        let este = *x;
+        *x += w + hueco;
+        Some(este)
+    }).collect();
     for (i, paso) in Paso::TODOS.iter().enumerate() {
-        let cx = e(M) + e(1) * ancho_paso * i as f32;
+        let cx = xs[i];
         let (fondo, borde) = if *paso < a.paso {
             (p.verde, p.verde)
         } else if *paso == a.paso {
@@ -69,6 +76,19 @@ pub fn pintar(l: &mut Lienzo, a: &Asistente, oscuro: bool, escala: f32, t_seg: f
 
     // Formas de cada paso (antes que el texto).
     let botones = a.controles();
+    // Anillo de foco (teclado): redondeado como el control, dibujado debajo de él.
+    if let Some((c, r)) = botones.iter().find(|(c, _)| a.foco == Some(*c)) {
+        let (x, y, ww, hh) = er(*r);
+        let radio = match c {
+            Control::Preset(_) => hh / 2.0,
+            Control::Mantener => e(8),
+            Control::Primario | Control::Secundario | Control::VerLista | Control::AbrirCarpeta | Control::VerBorrados | Control::Restaurar => e(4),
+            _ => e(6),
+        };
+        let (g, s) = (e(2).round().max(2.0), e(2).round().max(2.0));
+        l.caja(x - g - s, y - g - s, ww + 2.0 * (g + s), hh + 2.0 * (g + s), radio + g + s, p.texto, 1.0);
+        l.caja(x - s, y - s, ww + 2.0 * s, hh + 2.0 * s, radio + s, p.fondo, 1.0);
+    }
     let tarjeta = |l: &mut Lienzo, y: i32, alto: i32| {
         l.caja(x0, e(y), ancho_util, e(alto), e(8), p.borde_tarjeta, 1.0);
         l.caja(x0 + 1.0, e(y) + 1.0, ancho_util - 2.0, e(alto) - 2.0, e(8) - 1.0, p.tarjeta, 1.0);
@@ -111,7 +131,13 @@ pub fn pintar(l: &mut Lienzo, a: &Asistente, oscuro: bool, escala: f32, t_seg: f
                 l.caja(x, y, ww, hh, e(8), ROJO_BOTON, 1.0);
                 let av = a.mantener.avance(t_seg) as f32;
                 if av > 0.0 {
-                    l.caja(x, y, (ww * av).max(e(8)), hh, e(8), ROJO_LLENO, 1.0);
+                    // Relleno con el borde izquierdo redondeado y el avance recto.
+                    let ancho = (ww * av).max(e(8));
+                    l.caja(x, y, ancho.min(e(16)), hh, e(8), ROJO_LLENO, 1.0);
+                    if ancho > e(8) {
+                        let fin = if av >= 1.0 { ww - e(8) } else { ancho - e(8) };
+                        l.caja(x + e(8), y, fin, hh, if av >= 1.0 { e(8) } else { 0.0 }, ROJO_LLENO, 1.0);
+                    }
                 }
             } else {
                 l.caja(x, y, ww, hh, e(8), p.borde_boton, 1.0);
@@ -163,9 +189,6 @@ pub fn pintar(l: &mut Lienzo, a: &Asistente, oscuro: bool, escala: f32, t_seg: f
                 l.caja(x + 1.0, y + 1.0, ww - 2.0, hh - 2.0, e(4) - 1.0, fondo, 1.0);
             }
         }
-        if a.foco == Some(*c) {
-            anillo(l, p.texto, x - e(3), y - e(3), ww + e(6), hh + e(6), escala);
-        }
     }
 
     // ---- Texto ----
@@ -173,7 +196,7 @@ pub fn pintar(l: &mut Lienzo, a: &Asistente, oscuro: bool, escala: f32, t_seg: f
     unsafe { windows_sys::Win32::Graphics::Gdi::GdiFlush() };
     texto(dc, &f.titulo, t(T::AsVentana), p.texto, (x0, e(20), ancho_util, e(32)), Alinear::Izq);
     for (i, paso) in Paso::TODOS.iter().enumerate() {
-        let cx = e(M) + e(1) * ancho_paso * i as f32;
+        let cx = xs[i];
         let (marca, fuente, color_marca) = if *paso < a.paso {
             (CHECK.to_string(), &f.icono_peq, [255, 255, 255])
         } else {
@@ -181,8 +204,7 @@ pub fn pintar(l: &mut Lienzo, a: &Asistente, oscuro: bool, escala: f32, t_seg: f
         };
         texto(dc, fuente, &marca, color_marca, (cx, e(64), e(20), e(20)), Alinear::Centro);
         let color = if *paso == a.paso { p.texto } else { p.secundario };
-        let fn_nombre = if *paso == a.paso { &f.semi_peq } else { &f.peq };
-        texto(dc, fn_nombre, paso.nombre(), color, (cx + e(26), e(64), e(1) * ancho_paso - e(28), e(20)), Alinear::Izq);
+        texto(dc, fuente_paso(*paso), paso.nombre(), color, (cx + e(26), e(64), anchos[i], e(20)), Alinear::Izq);
     }
 
     let s = a.seleccion();
@@ -214,6 +236,10 @@ pub fn pintar(l: &mut Lienzo, a: &Asistente, oscuro: bool, escala: f32, t_seg: f
             }
             texto(dc, &f.peq, &linea2, p.secundario, (tx, e(504), tw, e(18)), Alinear::Izq);
             let excl = exclusiones(s);
+            if excl.is_empty() && s.elementos > 0 {
+                texto(dc, &f.icono_peq, CHECK, p.verde, (tx, e(527), e(16), e(18)), Alinear::Izq);
+                texto(dc, &f.peq, t(T::AsTodoCopiado), p.secundario, (tx + e(20), e(526), tw - e(20), e(18)), Alinear::Izq);
+            }
             if !excl.is_empty() {
                 let etiqueta = t(T::AsNoSeTocan);
                 let ancho_etq = ancho_texto(dc, &f.peq, etiqueta) + e(8);
@@ -417,15 +443,6 @@ fn casilla(l: &mut Lienzo, p: &Paleta, x: f32, y: f32, lado: f32, marcada: bool,
         l.caja(x, y, lado, lado, r, if activa { p.secundario } else { p.borde_boton }, 1.0);
         l.caja(x + 1.5, y + 1.5, lado - 3.0, lado - 3.0, r - 1.0, p.tarjeta, 1.0);
     }
-}
-
-/// Anillo de foco (teclado): rectángulo de 2 px.
-fn anillo(l: &mut Lienzo, c: Rgb, x: f32, y: f32, w: f32, h: f32, escala: f32) {
-    let g = (2.0 * escala).round().max(2.0);
-    l.caja(x, y, w, g, 0.0, c, 1.0);
-    l.caja(x, y + h - g, w, g, 0.0, c, 1.0);
-    l.caja(x, y, g, h, 0.0, c, 1.0);
-    l.caja(x + w - g, y, g, h, 0.0, c, 1.0);
 }
 
 /// Tamaño del lienzo en píxeles para una escala.

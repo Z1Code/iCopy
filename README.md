@@ -78,11 +78,17 @@ iCopy **nunca borra nada de iCloud por su cuenta**. "Liberar espacio" es un paso
 
 1. Solo considera elementos con **todas** sus partes verificadas.
 2. **Vuelve a verificar en disco** justo antes de borrar (existe, tamaño, SHA-256).
-3. Te muestra un resumen (n.º de archivos, GB, rango de fechas, excluidos) y exige escribir **`BORRAR`**.
-4. **Conserva los últimos 30 días** en iCloud (configurable).
-5. **Nunca toca la Fototeca Compartida** de iCloud.
-6. Lo borrado va a **"Eliminado recientemente"**, donde Apple lo guarda 30 días.
-7. Nunca borra nada del PC. Trabaja en tandas de 50, reanudables, y anota cada borrado en `borrados.csv`.
+3. Te muestra un resumen (n.º de archivos, GB, rango de fechas, excluidos y por qué) y exige una
+   confirmación explícita: en la ventana, marcar la casilla y **mantener pulsado** el botón 2 s; en la
+   consola, escribir **`BORRAR`**.
+4. **Conserva siempre los últimos 30 días** en iCloud, por fecha de captura y por fecha en que se añadió
+   (aunque elijas años concretos).
+5. **Nunca toca la Fototeca Compartida** de iCloud, ni lo que tenga datos que icopia aún no sabe copiar.
+6. Lo borrado va a **"Eliminado recientemente"**, donde Apple lo guarda 30 días, y **se puede restaurar**:
+   botón «Restaurar este borrado» al terminar o `icopia restaurar --ultima`.
+7. Nunca borra nada del PC. Trabaja en tandas de 50, a un ritmo suave: si Apple pide esperar (HTTP 503 o
+   `TRY_AGAIN_LATER`), espera cada vez más y reintenta, sin dar nada por fallido por ello. Anota cada
+   borrado en `borrados.csv` con el identificador de la liberación.
 
 ## Instalación
 
@@ -116,13 +122,19 @@ contraseña y el código de 6 dígitos de tu iPhone). La contraseña no se guard
 | --- | --- |
 | Copiar ahora / Pausar | Lanza una ronda o la detiene (se reanuda donde estaba) |
 | Verificar todo | Vuelve a comprobar todo lo copiado |
-| Liberar espacio en iCloud… | Borra de iCloud lo verificado (con las garantías de arriba) |
+| Liberar espacio en iCloud… | Abre el asistente para borrar de iCloud lo verificado (con las garantías de arriba) |
 | Abrir carpeta de fotos | Abre la carpeta destino |
 | Cambiar destino… | Elige otra carpeta o disco |
 | Iniciar sesión en iCloud… | Abre la ventana de inicio de sesión (2FA) |
 | Iniciar con Windows | Activa o desactiva el arranque automático |
 
-Mientras se libera espacio (desde el menú o con `icopia liberar`), el panel muestra una segunda barra
+**Liberar espacio en iCloud** (menú, o botón «Liberar espacio» del panel con la copia al día) abre un
+asistente en cinco pasos: *Elegir* (conservar los últimos 30 días, 3, 6 o 12 meses, 2 o 3 años, o
+marcar años de captura, con el resumen al instante), *Revisar* (vuelve a listar iCloud y re-verifica en
+disco; «Ver lista» abre el plan en CSV), *Confirmar*, *En marcha* (pausar o cancelar; se puede cerrar la
+ventana y el borrado sigue) y *Resultado* (con «Restaurar este borrado»).
+
+Mientras se libera espacio (desde el asistente o con `icopia liberar`), el panel muestra una segunda barra
 con la fase (consultando iCloud, comprobando archivos en disco, borrando), el avance, los GB y el
 tiempo restante; el tooltip del icono también lo dice. Al terminar queda un resumen durante 24 h
 (lo liberado, los fallos si los hubo y el recordatorio de vaciar «Eliminado recientemente»), y si el
@@ -137,8 +149,14 @@ icopia diagnostico             Comprueba la sesión y que las descargas funciona
 icopia copiar [--mes AAAA-MM]  Copia y verifica lo que falte
 icopia estado                  Resumen de lo copiado
 icopia verificar               Vuelve a comprobar todo lo copiado
-icopia liberar [--dias N]      Borra de iCloud lo ya copiado y verificado (pide confirmación)
+icopia liberar [--dias N | --anios 2011-2019,2021 | --hasta-anio 2025]
+                               Borra de iCloud lo ya copiado y verificado (pide confirmación)
+icopia restaurar --ultima | --sesion ID
+                               Saca de "Eliminado recientemente" lo de una liberación
 ```
+
+La interfaz está en español o en inglés según el idioma de Windows (`ICOPIA_IDIOMA=es|en` lo fuerza).
+Para cuentas de iCloud de China continental, pon `"dominio": "cn"` en `config.json`.
 
 ## Desarrollo
 

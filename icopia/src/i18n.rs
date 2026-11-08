@@ -143,7 +143,7 @@ textos! {
     BotRevisar => "Revisar ahora", "Check now";
     BotSesion => "Iniciar sesión", "Sign in";
     BotCarpeta => "Abrir carpeta", "Open folder";
-    BotLiberar => "Liberar espacio…", "Free up space…";
+    BotLiberar => "Liberar espacio", "Free up space";
     FilaAhora => "Ahora", "Now";
     FilaListado => "Último listado de iCloud", "Last iCloud scan";
     FilaErrores => "Errores", "Errors";
@@ -345,6 +345,7 @@ textos! {
     AsNadaSeleccionado => "Con esta selección no se libera nada", "Nothing is freed up with this selection";
     AsRango => "De {desde} a {hasta}", "From {desde} to {hasta}";
     AsNoSeTocan => "No se tocan:", "Left untouched:";
+    AsTodoCopiado => "Todo lo del rango elegido está copiado y verificado en tu PC", "Everything in the chosen range is copied and verified on your PC";
     AsExclNoCopiados => "{n} sin copiar aún", "{n} not copied yet";
     AsExclCompartida => "{n} de la Fototeca Compartida", "{n} in the Shared Library";
     AsExclNoLiberables => "{n} que icopia aún no sabe copiar", "{n} icopia can't copy yet";

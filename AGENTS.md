@@ -13,17 +13,21 @@ Diseño completo: `docs/superpowers/specs/2026-11-07-icopia-design.md`. Visión 
 
 ```
 icopia/                 crate Rust (lib + 3 binarios)
-  src/main.rs           CLI `icopia` (destino, login, diagnostico, copiar, estado, verificar, liberar)
+  src/main.rs           CLI `icopia` (destino, login, diagnostico, copiar, estado, verificar, liberar, restaurar)
   src/bin/icopia-bandeja.rs  app de bandeja (menú, panel, avisos)
   src/bin/icopia-login.rs    ventana de inicio de sesión (Apple ID, contraseña, 2FA)
   src/motor.rs          rondas: listar, descargar, verificar, renovar enlaces caducados
   src/descarga.rs       HTTP (reqwest), .part, reanudación por Range
   src/verificar.rs      tamaño + estructura de contenedor + SHA-256
   src/registro.rs       SQLite (WAL) en <destino>\.icopia\registro.db
-  src/liberar.rs        reglas y plan de borrado en iCloud
+  src/liberar.rs        plan de borrado, borrado por lotes (ritmo/esperas ante Apple), restaurar
+  src/criterio.rs       qué se libera: conservar N días (mín. 30) o años de captura
+  src/progreso_liberar.rs  avance del borrado en el registro (meta `liberar_progreso`) para la bandeja
+  src/i18n.rs           textos en español e inglés (todas las claves en los dos idiomas)
   src/puente.rs         cliente del puente Python (JSON por líneas, stdin/stdout)
-  src/bandeja/          estado, panel (vista + dibujo GDI), icono, avisos, autoarranque
-  examples/             panel_demo, panel_social, generar_icono (renders sin datos reales)
+  src/bandeja/          estado, panel (vista + dibujo GDI), asistente de liberar (modelo, dibujo,
+                        ventana; el trabajo lo hace hilo_liberar en el hilo del motor), icono, avisos
+  examples/             panel_demo, panel_social, asistente_demo, generar_icono (renders sin datos reales)
   tests/                integración con iCloud falso (tests/datos/puente_falso.py + HTTP local)
 puente/                 puente Python sobre pyicloud_ipd (icloudpd, versión fija)
   puente_icloud.py, tests/, build.ps1 (PyInstaller → dist/puente-icloud.exe)
@@ -55,12 +59,14 @@ cargo run --manifest-path icopia\Cargo.toml --example panel_demo -- panel.png 1.
 1. **Nunca subas al repo** Apple IDs, correos, contraseñas, códigos 2FA, cookies o archivos de sesión,
    `config.json`, `registro.db` (ni `*.db-wal`/`*.db-shm`), logs, `borrados.csv` ni fotos de nadie.
    En pruebas usa datos inventados (`yo@ejemplo.com`).
-2. **Nunca ejecutes `icopia liberar`** ni "Liberar espacio en iCloud…" (ni el comando `borrar` del puente)
+2. **Nunca ejecutes `icopia liberar`/`icopia restaurar`** ni "Liberar espacio en iCloud…" (ni los comandos `borrar`/`restaurar` del puente)
    contra una cuenta real sin confirmación humana explícita en ese momento. Borra fotos de iCloud.
 3. No toques la configuración, la sesión ni la carpeta destino reales de la persona salvo que lo pida.
 4. No debilites las garantías: verificación antes de dar por bueno, re-verificación antes de borrar,
-   confirmación `BORRAR`, conservar los últimos N días, nunca la Fototeca Compartida, nunca borrar del PC.
-   Cualquier cambio en `liberar.rs`, `verificar.rs` o el borrado del puente necesita pruebas.
+   confirmación explícita (`BORRAR` o casilla + mantener pulsado), conservar al menos 30 días, nunca la Fototeca Compartida, nunca borrar del PC.
+   Cualquier cambio en `liberar.rs`, `criterio.rs`, `verificar.rs` o el borrado del puente necesita pruebas.
+5. Textos nuevos de la interfaz: en `i18n.rs`, en español **y** en inglés (la prueba lo exige). Para ver
+   el asistente sin bandeja: `cargo run --example asistente_demo -- salida.png 1.5 oscuro anios en`.
 
 ## Dónde va el Apple ID de la persona
 
