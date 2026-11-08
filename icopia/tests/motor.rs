@@ -82,20 +82,99 @@ fn url_caducada_pide_relistar() {
     assert_eq!((r.fin, r.fallidas, r.verificadas), (FinRonda::Relistar, 1, 2), "el resto de la ronda sigue copiándose");
 }
 
+fn sin_temporales(carpeta: &Path) {
+    let restos: Vec<String> = std::fs::read_dir(carpeta)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|n| n.contains(".part"))
+        .collect();
+    assert!(restos.is_empty(), "quedan temporales: {restos:?}");
+}
+
 #[test]
-fn contenido_corrupto_no_se_acepta() {
-    let mut malo = jpeg(1000);
-    let n = malo.len();
-    malo[n - 1] = 0;
-    malo[n - 2] = 0;
-    let s = servidor(vec![("/j", Comportamiento::Servir(malo.clone()))]);
+fn estructura_atipica_constante_se_acepta_por_doble_descarga() {
+    let j = jpeg_atipico(1000);
+    let s = servidor(vec![("/j", Comportamiento::Servir(j.clone()))]);
+    let mut f = FuenteFalsa { assets: vec![asset("A1", "IMG_0001", AGO, "PrimarySync", vec![parte(TipoParte::Original, &j, s.url("/j"), "JPG")])], ..Default::default() };
+    let d = tempfile::tempdir().unwrap();
+    let reg = nuevo_registro();
+    let r = ronda(d.path(), &reg, &mut f);
+    assert_eq!((r.verificadas, r.fallidas), (1, 0));
+    let carpeta = d.path().join(r"2026\2026-08");
+    assert_eq!(std::fs::read(carpeta.join("IMG_0001.JPG")).unwrap(), j);
+    sin_temporales(&carpeta);
+    let p = s.peticiones_a("/j");
+    assert_eq!(p.len(), 2, "exactamente dos descargas");
+    assert!(p.iter().all(|x| x.rango.is_none()), "las dos desde el byte 0: {p:?}");
+    let g = reg.lock().unwrap().partes_verificadas().unwrap();
+    assert!(g[0].estructura_atipica);
+    assert_eq!(reg.lock().unwrap().resumen().unwrap().estructura_atipica, 1);
+    assert!(errores(&reg).is_empty());
+    assert!(leer_bitacora(d.path()).contains("ATIPICO IMG_0001 (original): estructura no estándar en iCloud; confirmado por doble descarga"));
+    // Ya verificado: otra ronda no descarga nada.
+    assert_eq!(ronda(d.path(), &reg, &mut f).verificadas, 0);
+    assert_eq!(s.total_peticiones(), 2);
+}
+
+#[test]
+fn estructura_atipica_en_png_e_isobmff_tambien() {
+    let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    png.extend(patron(300));
+    let mut mov_cortado = mov(3000);
+    mov_cortado.truncate(2000);
+    let s = servidor(vec![("/p", Comportamiento::Servir(png.clone())), ("/m", Comportamiento::Servir(mov_cortado.clone()))]);
+    let mut f = FuenteFalsa {
+        assets: vec![
+            asset("A1", "IMG_0001", AGO, "PrimarySync", vec![parte(TipoParte::Original, &png, s.url("/p"), "PNG")]),
+            asset("A2", "IMG_0002", AGO, "PrimarySync", vec![parte(TipoParte::Original, &mov_cortado, s.url("/m"), "MOV")]),
+        ],
+        ..Default::default()
+    };
+    let d = tempfile::tempdir().unwrap();
+    let reg = nuevo_registro();
+    assert_eq!(ronda(d.path(), &reg, &mut f).verificadas, 2);
+    assert_eq!((s.peticiones_a("/p").len(), s.peticiones_a("/m").len()), (2, 2));
+    assert_eq!(reg.lock().unwrap().resumen().unwrap().estructura_atipica, 2);
+}
+
+#[test]
+fn dos_descargas_distintas_se_rechazan() {
+    let malo = jpeg_atipico(1000);
+    let mut otro = malo.clone();
+    otro[500] ^= 0x01;
+    let s = servidor(vec![("/j", Comportamiento::PorPeticion(vec![malo.clone(), otro]))]);
     let mut f = FuenteFalsa { assets: vec![asset("A1", "IMG_0001", AGO, "PrimarySync", vec![parte(TipoParte::Original, &malo, s.url("/j"), "JPG")])], ..Default::default() };
     let d = tempfile::tempdir().unwrap();
-    let r = ronda(d.path(), &nuevo_registro(), &mut f);
-    assert_eq!(r.fallidas, 1);
+    let reg = nuevo_registro();
+    let r = ronda(d.path(), &reg, &mut f);
+    assert_eq!((r.verificadas, r.fallidas), (0, 1));
+    assert_eq!(s.peticiones_a("/j").len(), 2);
     let carpeta = d.path().join(r"2026\2026-08");
     assert!(!carpeta.join("IMG_0001.JPG").exists());
-    assert!(!carpeta.join("IMG_0001.JPG.part").exists());
+    sin_temporales(&carpeta);
+    let e = errores(&reg);
+    assert_eq!(e.len(), 1);
+    assert!(e[0].contains("las dos descargas no coinciden"), "{e:?}");
+    assert!(leer_bitacora(d.path()).contains("ATIPICO IMG_0001 (original): estructura no estándar en iCloud; las dos descargas no coinciden"));
+    assert!(reg.lock().unwrap().partes_pendientes(motor::ahora(), None).unwrap().is_empty(), "espera con el reintento normal");
+}
+
+#[test]
+fn atipico_ya_confirmado_se_adopta_tras_un_corte() {
+    let j = jpeg_atipico(500);
+    let s = servidor(vec![("/j", Comportamiento::Servir(j.clone()))]);
+    let mut f = FuenteFalsa { assets: vec![asset("A1", "IMG_0001", AGO, "PrimarySync", vec![parte(TipoParte::Original, &j, s.url("/j"), "JPG")])], ..Default::default() };
+    let d = tempfile::tempdir().unwrap();
+    let reg = nuevo_registro();
+    ronda(d.path(), &reg, &mut f);
+    assert_eq!(s.total_peticiones(), 2);
+    // Simula un corte entre renombrar el .part confirmado y anotarlo como verificado.
+    let sha = reg.lock().unwrap().partes_verificadas().unwrap()[0].sha256.clone();
+    reg.lock().unwrap().marcar_para_redescarga("A1", TipoParte::Original, "prueba").unwrap();
+    reg.lock().unwrap().anotar_sha_pendiente("A1", TipoParte::Original, &sha, true).unwrap();
+    assert_eq!(ronda(d.path(), &reg, &mut f).verificadas, 1);
+    assert_eq!(s.total_peticiones(), 2, "se adopta sin descargar");
+    assert!(reg.lock().unwrap().partes_verificadas().unwrap()[0].estructura_atipica);
 }
 
 #[test]
@@ -141,7 +220,7 @@ fn archivo_final_existente_se_adopta_sin_descargar() {
     // Simula un corte entre renombrar el .part verificado y anotarlo como verificado.
     let sha = reg.lock().unwrap().partes_verificadas().unwrap()[0].sha256.clone();
     reg.lock().unwrap().marcar_para_redescarga("A1", TipoParte::Original, "prueba").unwrap();
-    reg.lock().unwrap().anotar_sha_pendiente("A1", TipoParte::Original, &sha).unwrap();
+    reg.lock().unwrap().anotar_sha_pendiente("A1", TipoParte::Original, &sha, false).unwrap();
     assert_eq!(ronda(d.path(), &reg, &mut f).verificadas, 1);
     assert_eq!(s.total_peticiones(), 1);
 }
@@ -155,7 +234,7 @@ fn archivo_final_con_sha_pendiente_distinto_no_se_adopta() {
     let reg = nuevo_registro();
     ronda(d.path(), &reg, &mut f);
     reg.lock().unwrap().marcar_para_redescarga("A1", TipoParte::Original, "prueba").unwrap();
-    reg.lock().unwrap().anotar_sha_pendiente("A1", TipoParte::Original, "otro").unwrap();
+    reg.lock().unwrap().anotar_sha_pendiente("A1", TipoParte::Original, "otro", false).unwrap();
     assert_eq!(ronda(d.path(), &reg, &mut f).verificadas, 1);
     assert_eq!(s.total_peticiones(), 2);
 }

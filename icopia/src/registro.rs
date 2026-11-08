@@ -24,6 +24,8 @@ pub struct TrabajoParte {
     pub ruta: Option<String>,
     /// SHA-256 del `.part` verificado justo antes de renombrarlo; solo con él se adopta un archivo final ya existente.
     pub sha_pendiente: Option<String>,
+    /// El `sha_pendiente` es de un archivo con estructura atípica confirmado por doble descarga.
+    pub estructura_atipica: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -34,6 +36,8 @@ pub struct ParteGuardada {
     pub tamano: u64,
     pub extension: String,
     pub sha256: String,
+    /// Estructura no estándar en iCloud, confirmada por doble descarga: se re-verifica solo por tamaño y SHA-256.
+    pub estructura_atipica: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -64,6 +68,8 @@ pub struct Resumen {
     pub bytes_total: u64,
     pub bytes_verificados: u64,
     pub borrados_icloud: u64,
+    /// Verificadas con estructura atípica (confirmadas por doble descarga).
+    pub estructura_atipica: u64,
 }
 
 /// Lo que muestra la bandeja: una consulta ligera para poder repetirla cada segundo.
@@ -107,6 +113,7 @@ CREATE TABLE IF NOT EXISTS partes(
   proximo_intento INTEGER NOT NULL DEFAULT 0,
   ultimo_error TEXT,
   sha_pendiente TEXT,
+  estructura_atipica INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY(asset_id, tipo)
 );
 CREATE INDEX IF NOT EXISTS partes_estado ON partes(estado, proximo_intento);
@@ -116,20 +123,22 @@ CREATE INDEX IF NOT EXISTS partes_estado ON partes(estado, proximo_intento);
 // Un fallo por enlace caducado no es culpa del asset: al llegar un enlace nuevo se olvida (intentos, espera
 // y estado 'error'). Las versiones anteriores los contaban como fallos y penalizaban miles de partes.
 // Igual con "JPEG sin marcador de fin": falso positivo de una verificación antigua (JPEG con datos tras el EOI).
+// Y con cualquier "archivo incompleto o dañado" (estructura): ahora se confirma por doble descarga.
 const UPSERT_PARTE: &str = r#"
 INSERT INTO partes(asset_id, tipo, extension, tamano, checksum_apple, url) VALUES(?1, ?2, ?3, ?4, ?5, ?6)
 ON CONFLICT(asset_id, tipo) DO UPDATE SET
   url = excluded.url,
   checksum_apple = excluded.checksum_apple,
   estado = CASE WHEN partes.tamano <> excluded.tamano OR partes.extension <> excluded.extension OR partes.checksum_apple <> excluded.checksum_apple THEN 'pendiente'
-    WHEN partes.estado = 'error' AND (partes.ultimo_error LIKE 'enlace de descarga caducado%' OR partes.ultimo_error LIKE '%JPEG sin marcador de fin%') THEN 'pendiente' ELSE partes.estado END,
+    WHEN partes.estado = 'error' AND (partes.ultimo_error LIKE 'enlace de descarga caducado%' OR partes.ultimo_error LIKE '%JPEG sin marcador de fin%' OR partes.ultimo_error LIKE '%archivo incompleto o dañado%') THEN 'pendiente' ELSE partes.estado END,
   sha256 = CASE WHEN partes.tamano <> excluded.tamano OR partes.extension <> excluded.extension OR partes.checksum_apple <> excluded.checksum_apple THEN NULL ELSE partes.sha256 END,
   intentos = CASE WHEN partes.tamano <> excluded.tamano OR partes.extension <> excluded.extension OR partes.checksum_apple <> excluded.checksum_apple THEN 0
-    WHEN (partes.ultimo_error LIKE 'enlace de descarga caducado%' OR partes.ultimo_error LIKE '%JPEG sin marcador de fin%') THEN 0 ELSE partes.intentos END,
+    WHEN (partes.ultimo_error LIKE 'enlace de descarga caducado%' OR partes.ultimo_error LIKE '%JPEG sin marcador de fin%' OR partes.ultimo_error LIKE '%archivo incompleto o dañado%') THEN 0 ELSE partes.intentos END,
   proximo_intento = CASE WHEN partes.tamano <> excluded.tamano OR partes.extension <> excluded.extension OR partes.checksum_apple <> excluded.checksum_apple THEN 0
-    WHEN (partes.ultimo_error LIKE 'enlace de descarga caducado%' OR partes.ultimo_error LIKE '%JPEG sin marcador de fin%') THEN 0 ELSE partes.proximo_intento END,
-  ultimo_error = CASE WHEN (partes.ultimo_error LIKE 'enlace de descarga caducado%' OR partes.ultimo_error LIKE '%JPEG sin marcador de fin%') THEN NULL ELSE partes.ultimo_error END,
+    WHEN (partes.ultimo_error LIKE 'enlace de descarga caducado%' OR partes.ultimo_error LIKE '%JPEG sin marcador de fin%' OR partes.ultimo_error LIKE '%archivo incompleto o dañado%') THEN 0 ELSE partes.proximo_intento END,
+  ultimo_error = CASE WHEN (partes.ultimo_error LIKE 'enlace de descarga caducado%' OR partes.ultimo_error LIKE '%JPEG sin marcador de fin%' OR partes.ultimo_error LIKE '%archivo incompleto o dañado%') THEN NULL ELSE partes.ultimo_error END,
   sha_pendiente = CASE WHEN partes.tamano <> excluded.tamano OR partes.extension <> excluded.extension OR partes.checksum_apple <> excluded.checksum_apple THEN NULL ELSE partes.sha_pendiente END,
+  estructura_atipica = CASE WHEN partes.tamano <> excluded.tamano OR partes.extension <> excluded.extension OR partes.checksum_apple <> excluded.checksum_apple THEN 0 ELSE partes.estructura_atipica END,
   ruta = CASE WHEN partes.extension <> excluded.extension THEN NULL ELSE partes.ruta END,
   ruta_clave = CASE WHEN partes.extension <> excluded.extension THEN NULL ELSE partes.ruta_clave END,
   tamano = excluded.tamano,
@@ -139,7 +148,7 @@ ON CONFLICT(asset_id, tipo) DO UPDATE SET
 const EN_ULTIMA_LISTA: &str = "a.visto_en_lista = CAST((SELECT valor FROM meta WHERE clave = 'marca_lista') AS INTEGER)";
 
 const COLUMNAS_TRABAJO: &str =
-    "p.asset_id, p.tipo, a.nombre_base, a.fecha, p.extension, p.tamano, p.url, p.ruta, p.sha_pendiente, p.checksum_apple";
+    "p.asset_id, p.tipo, a.nombre_base, a.fecha, p.extension, p.tamano, p.url, p.ruta, p.sha_pendiente, p.checksum_apple, p.estructura_atipica";
 
 fn trabajo_de_fila(r: &rusqlite::Row) -> rusqlite::Result<TrabajoParte> {
     Ok(TrabajoParte {
@@ -153,6 +162,7 @@ fn trabajo_de_fila(r: &rusqlite::Row) -> rusqlite::Result<TrabajoParte> {
         ruta: r.get(7)?,
         sha_pendiente: r.get(8)?,
         checksum: r.get(9)?,
+        estructura_atipica: r.get::<_, i64>(10)? != 0,
     })
 }
 
@@ -211,6 +221,7 @@ impl Registro {
         asegurar_columna(&con, "partes", "sha_pendiente", "TEXT")?;
         asegurar_columna(&con, "assets", "liberable", "INTEGER NOT NULL DEFAULT 1")?;
         asegurar_columna(&con, "assets", "agregado_unix", "INTEGER")?;
+        asegurar_columna(&con, "partes", "estructura_atipica", "INTEGER NOT NULL DEFAULT 0")?;
         Ok(Registro { con })
     }
 
@@ -324,20 +335,25 @@ impl Registro {
     }
 
     pub fn marcar_verificada(&mut self, asset_id: &str, tipo: TipoParte, sha256: &str) -> Result<()> {
+        self.marcar_verificada_con(asset_id, tipo, sha256, false)
+    }
+
+    /// `atipica`: estructura no estándar en iCloud, confirmada por doble descarga.
+    pub fn marcar_verificada_con(&mut self, asset_id: &str, tipo: TipoParte, sha256: &str, atipica: bool) -> Result<()> {
         self.con.execute(
             "UPDATE partes SET estado = 'verificado', sha256 = ?3, intentos = 0, proximo_intento = 0, ultimo_error = NULL,
-               sha_pendiente = NULL
+               sha_pendiente = NULL, estructura_atipica = ?4
              WHERE asset_id = ?1 AND tipo = ?2",
-            params![asset_id, tipo.como_str(), sha256],
+            params![asset_id, tipo.como_str(), sha256, atipica],
         )?;
         Ok(())
     }
 
-    /// Se anota antes de renombrar el `.part` verificado al nombre final.
-    pub fn anotar_sha_pendiente(&mut self, asset_id: &str, tipo: TipoParte, sha256: &str) -> Result<()> {
+    /// Se anota antes de renombrar el `.part` verificado al nombre final (`atipica`: confirmado por doble descarga).
+    pub fn anotar_sha_pendiente(&mut self, asset_id: &str, tipo: TipoParte, sha256: &str, atipica: bool) -> Result<()> {
         self.con.execute(
-            "UPDATE partes SET sha_pendiente = ?3 WHERE asset_id = ?1 AND tipo = ?2",
-            params![asset_id, tipo.como_str(), sha256],
+            "UPDATE partes SET sha_pendiente = ?3, estructura_atipica = ?4 WHERE asset_id = ?1 AND tipo = ?2",
+            params![asset_id, tipo.como_str(), sha256, atipica],
         )?;
         Ok(())
     }
@@ -360,7 +376,7 @@ impl Registro {
     pub fn marcar_para_redescarga(&mut self, asset_id: &str, tipo: TipoParte, motivo: &str) -> Result<()> {
         self.con.execute(
             "UPDATE partes SET estado = 'pendiente', sha256 = NULL, intentos = 0, proximo_intento = 0, ultimo_error = ?3,
-               sha_pendiente = NULL
+               sha_pendiente = NULL, estructura_atipica = 0
              WHERE asset_id = ?1 AND tipo = ?2",
             params![asset_id, tipo.como_str(), motivo],
         )?;
@@ -369,7 +385,7 @@ impl Registro {
 
     pub fn partes_verificadas(&self) -> Result<Vec<ParteGuardada>> {
         let mut st = self.con.prepare(
-            "SELECT asset_id, tipo, ruta, tamano, extension, sha256 FROM partes
+            "SELECT asset_id, tipo, ruta, tamano, extension, sha256, estructura_atipica FROM partes
              WHERE estado = 'verificado' AND ruta IS NOT NULL AND sha256 IS NOT NULL ORDER BY ruta",
         )?;
         let filas = st.query_map([], |r| {
@@ -380,6 +396,7 @@ impl Registro {
                 tamano: r.get::<_, i64>(3)? as u64,
                 extension: r.get(4)?,
                 sha256: r.get(5)?,
+                estructura_atipica: r.get::<_, i64>(6)? != 0,
             })
         })?;
         Ok(filas.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -402,7 +419,7 @@ impl Registro {
             .query_map(params![marca, limite_unix, BIBLIOTECA_PERSONAL], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
             .collect::<rusqlite::Result<_>>()?;
         let mut st_p = self.con.prepare(
-            "SELECT asset_id, tipo, ruta, tamano, extension, sha256 FROM partes WHERE asset_id = ?1 ORDER BY tipo",
+            "SELECT asset_id, tipo, ruta, tamano, extension, sha256, estructura_atipica FROM partes WHERE asset_id = ?1 ORDER BY tipo",
         )?;
         let mut candidatos = Vec::with_capacity(base.len());
         for (id, nombre_base, fecha) in base {
@@ -415,6 +432,7 @@ impl Registro {
                         tamano: r.get::<_, i64>(3)? as u64,
                         extension: r.get(4)?,
                         sha256: r.get(5)?,
+                        estructura_atipica: r.get::<_, i64>(6)? != 0,
                     })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -465,6 +483,8 @@ impl Registro {
             |r| r.get(0),
         )?;
         let borrados: i64 = self.con.query_row("SELECT COUNT(*) FROM assets WHERE borrado_icloud IS NOT NULL", [], |r| r.get(0))?;
+        let atipicas: i64 =
+            self.con.query_row("SELECT COUNT(*) FROM partes WHERE estado = 'verificado' AND estructura_atipica = 1", [], |r| r.get(0))?;
         Ok(Resumen {
             assets: assets as u64,
             assets_completos: completos as u64,
@@ -475,6 +495,7 @@ impl Registro {
             bytes_total: bytes_total as u64,
             bytes_verificados: bytes_verificados as u64,
             borrados_icloud: borrados as u64,
+            estructura_atipica: atipicas as u64,
         })
     }
 
@@ -675,6 +696,43 @@ mod tests {
     }
 
     #[test]
+    fn relistar_perdona_los_fallos_de_estructura_para_la_doble_descarga() {
+        let mut r = Registro::en_memoria().unwrap();
+        let ids = ["A1", "A2", "A3", "A4"];
+        let a = || ids.iter().map(|i| asset(i, "PrimarySync", AGO, &[(Original, 10)])).collect::<Vec<_>>();
+        listar(&mut r, &a(), 100);
+        for _ in 0..10 {
+            r.registrar_fallo("A1", Original, "verificación: archivo incompleto o dañado: JPEG cortado antes del marcador de fin", 1000).unwrap();
+        }
+        r.registrar_fallo("A2", Original, "verificación: archivo incompleto o dañado: PNG sin bloque IEND final", 1000).unwrap();
+        r.registrar_fallo("A3", Original, "verificación: archivo incompleto o dañado: JPEG sin marcador de fin", 1000).unwrap();
+        r.registrar_fallo("A4", Original, "las dos descargas no coinciden", 1000).unwrap();
+        listar(&mut r, &a(), 200);
+        let pend: Vec<_> = r.partes_pendientes(1000, None).unwrap().into_iter().map(|t| t.asset_id).collect();
+        assert_eq!(pend, vec!["A1", "A2", "A3"], "el fallo por descargas distintas sigue con su espera");
+        assert_eq!(r.resumen().unwrap().con_error, 0);
+        assert_eq!(r.errores(10).unwrap(), vec!["IMG_A4 (original): las dos descargas no coinciden"]);
+    }
+
+    #[test]
+    fn la_marca_atipica_se_guarda_y_se_borra_si_cambia_el_contenido() {
+        let mut r = Registro::en_memoria().unwrap();
+        listar(&mut r, &[asset("A1", "PrimarySync", AGO, &[(Original, 10)])], 100);
+        r.anotar_sha_pendiente("A1", Original, "abc", true).unwrap();
+        assert!(r.partes_pendientes(1000, None).unwrap()[0].estructura_atipica);
+        r.asignar_ruta("A1", Original, "x").unwrap();
+        r.marcar_verificada_con("A1", Original, "abc", true).unwrap();
+        assert!(r.partes_verificadas().unwrap()[0].estructura_atipica);
+        assert_eq!(r.resumen().unwrap().estructura_atipica, 1);
+        listar(&mut r, &[asset("A1", "PrimarySync", AGO, &[(Original, 10)])], 200);
+        assert!(r.partes_verificadas().unwrap()[0].estructura_atipica, "relistar sin cambios la conserva");
+        listar(&mut r, &[asset("A1", "PrimarySync", AGO, &[(Original, 11)])], 300);
+        assert!(!r.partes_pendientes(1000, None).unwrap()[0].estructura_atipica);
+        r.marcar_verificada("A1", Original, "def").unwrap();
+        assert_eq!(r.resumen().unwrap().estructura_atipica, 0);
+    }
+
+    #[test]
     fn actualizar_enlaces_no_cambia_la_marca_ni_crea_nada() {
         let mut r = Registro::en_memoria().unwrap();
         let a = asset("A1", "PrimarySync", "2026-08-10T19:37:18-04:00", &[(Original, 10)]);
@@ -789,6 +847,7 @@ mod tests {
     fn migra_base_antigua_sin_sha_pendiente() {
         let con = Connection::open_in_memory().unwrap();
         let viejo = ESQUEMA.replace("  sha_pendiente TEXT,
+  estructura_atipica INTEGER NOT NULL DEFAULT 0,
 ", "").replace("borrado_icloud TEXT,
   liberable INTEGER NOT NULL DEFAULT 1,
   agregado_unix INTEGER", "borrado_icloud TEXT");
@@ -796,16 +855,25 @@ mod tests {
         assert!(con.prepare("SELECT sha_pendiente FROM partes").is_err());
         assert!(con.prepare("SELECT liberable FROM assets").is_err());
         assert!(con.prepare("SELECT agregado_unix FROM assets").is_err());
+        assert!(con.prepare("SELECT estructura_atipica FROM partes").is_err());
+        con.execute_batch("INSERT INTO assets(id, biblioteca, nombre_base, fecha, fecha_unix, mes, visto_en_lista) VALUES('A1', 'PrimarySync', 'IMG', 'f', 0, 'm', 1);
+           INSERT INTO partes(asset_id, tipo, extension, tamano, checksum_apple, url, ruta, estado, sha256) VALUES('A1', 'original', 'JPG', 1, 'c', 'u', 'r', 'verificado', 's');").unwrap();
         let r = Registro::con_esquema(con).unwrap();
         assert!(r.con.prepare("SELECT sha_pendiente FROM partes").is_ok());
         assert!(r.con.prepare("SELECT liberable, agregado_unix FROM assets").is_ok());
+        let p = r.partes_verificadas().unwrap();
+        assert!(!p[0].estructura_atipica, "lo ya verificado queda como estándar");
+        assert_eq!(r.resumen().unwrap().estructura_atipica, 0);
+        // Idempotente.
+        let r = Registro::con_esquema(r.con).unwrap();
+        assert_eq!(r.partes_verificadas().unwrap().len(), 1);
     }
 
     #[test]
     fn sha_pendiente_se_limpia_al_verificar() {
         let mut r = Registro::en_memoria().unwrap();
         listar(&mut r, &[asset("A1", "PrimarySync", AGO, &[(Original, 10)])], 100);
-        r.anotar_sha_pendiente("A1", Original, "abc").unwrap();
+        r.anotar_sha_pendiente("A1", Original, "abc", false).unwrap();
         assert_eq!(r.partes_pendientes(1000, None).unwrap()[0].sha_pendiente.as_deref(), Some("abc"));
         dar_por_copiado(&mut r, "A1", Original);
         r.marcar_para_redescarga("A1", Original, "x").unwrap();

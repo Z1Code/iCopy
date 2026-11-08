@@ -108,6 +108,28 @@ fn assets_con_datos_no_copiables_no_se_proponen() {
 }
 
 #[test]
+fn atipicos_confirmados_por_doble_descarga_son_liberables() {
+    let (v1, a1) = (jpeg(100), jpeg_atipico(200));
+    let s = servidor(vec![("/v1", Comportamiento::Servir(v1.clone())), ("/a1", Comportamiento::Servir(a1.clone()))]);
+    let mut fuente = FuenteFalsa {
+        assets: vec![
+            asset("V1", "IMG_V1", "2025-01-10T10:00:00-05:00", "PrimarySync", vec![parte(TipoParte::Original, &v1, s.url("/v1"), "JPG")]),
+            asset("A1", "IMG_A1", "2025-01-11T10:00:00-05:00", "PrimarySync", vec![parte(TipoParte::Original, &a1, s.url("/a1"), "JPG")]),
+        ],
+        ..Default::default()
+    };
+    let d = tempfile::tempdir().unwrap();
+    let reg = Mutex::new(Registro::en_memoria().unwrap());
+    let op = OpcionesRonda { concurrencia: 1, mes: None };
+    let r = motor::ejecutar_ronda(d.path(), &reg, &mut fuente, &descarga::cliente(), &op, &AtomicBool::new(false), &|_: Avance| {}).unwrap();
+    assert_eq!(r.verificadas, 2);
+    let plan = liberar::preparar(d.path(), &reg, 30, motor::ahora(), &|_, _| {}).unwrap();
+    assert_eq!(plan.listos.iter().map(|c| c.asset_id.as_str()).collect::<Vec<_>>(), vec!["V1", "A1"]);
+    assert!(plan.excluidos.is_empty(), "{:?}", plan.excluidos);
+    assert_eq!(plan.atipicos, 1);
+}
+
+#[test]
 fn un_fallo_al_anotar_no_detiene_el_borrado_ni_pierde_registros() {
     let mut e = escenario();
     // El CSV no se puede escribir (en su lugar hay una carpeta).

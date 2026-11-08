@@ -182,6 +182,9 @@ fn imprimir_resumen(reg: &Registro) -> Result<()> {
         r.verificadas, r.partes, r.bytes_verificados as f64 / 1e9, r.bytes_total as f64 / 1e9
     );
     println!("Pendientes: {}   Con error: {}   Borrados de iCloud: {}", r.pendientes, r.con_error, r.borrados_icloud);
+    if r.estructura_atipica > 0 {
+        println!("Con estructura atípica (confirmadas por doble descarga): {}", r.estructura_atipica);
+    }
     if let Some(m) = reg.marca_lista()? {
         if let Some(f) = chrono::DateTime::from_timestamp(m, 0) {
             println!("Último listado de iCloud: {}", f.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M"));
@@ -319,6 +322,9 @@ fn cmd_liberar(args: &[String]) -> Result<()> {
     println!("Listos para borrar de iCloud (y del iPhone): {} elementos, {:.1} GB", plan.listos.len(), plan.bytes as f64 / 1e9);
     if let (Some(a), Some(b)) = (plan.listos.first(), plan.listos.last()) {
         println!("Fechas: {} → {}", &a.fecha[..10], &b.fecha[..10]);
+    }
+    if plan.atipicos > 0 {
+        println!("De ellos, {} con estructura atípica (confirmadas por doble descarga)", plan.atipicos);
     }
     println!("Se conservan en iCloud los últimos {dias} días y todo lo de la Fototeca Compartida.");
     if plan.no_verificados > 0 {

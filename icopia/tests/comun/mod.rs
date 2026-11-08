@@ -13,6 +13,8 @@ pub enum Comportamiento {
     Estado(u16),
     /// Responde `codigo` tras esperar `ms` (p. ej. un enlace que caduca mientras se pide).
     EstadoTras { codigo: u16, ms: u64 },
+    /// La petición n.º i (desde 0) a la ruta recibe `datos[i]` (o el último si hay más peticiones).
+    PorPeticion(Vec<Vec<u8>>),
 }
 
 #[derive(Debug, Clone)]
@@ -79,7 +81,12 @@ fn atender(mut stream: TcpStream, mapa: &HashMap<String, Comportamiento>, petici
             }
         }
     }
-    peticiones.lock().unwrap().push(Peticion { ruta: ruta.clone(), rango: rango.clone() });
+    let previas = {
+        let mut p = peticiones.lock().unwrap();
+        let n = p.iter().filter(|x| x.ruta == ruta).count();
+        p.push(Peticion { ruta: ruta.clone(), rango: rango.clone() });
+        n
+    };
     let desde = rango
         .as_deref()
         .and_then(|r| r.strip_prefix("bytes="))
@@ -98,6 +105,7 @@ fn atender(mut stream: TcpStream, mapa: &HashMap<String, Comportamiento>, petici
             let _ = write!(stream, "HTTP/1.1 {codigo} X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         }
         Some(Comportamiento::Servir(datos)) => enviar(&mut stream, datos, desde, None),
+        Some(Comportamiento::PorPeticion(v)) => enviar(&mut stream, &v[previas.min(v.len() - 1)], desde, None),
         Some(Comportamiento::CortarPrimeraVez { datos, tras }) => {
             let primera_vez = cortadas.insert(ruta.clone(), true).is_none();
             enviar(&mut stream, datos, desde, if primera_vez { Some(*tras) } else { None });
@@ -150,6 +158,13 @@ pub fn jpeg(n: usize) -> Vec<u8> {
     let mut v = vec![0xFF, 0xD8, 0xFF, 0xFE, 0x00, 0x04, b'o', b'k', 0xFF, 0xDA, 0x00, 0x02];
     v.extend(patron(n).into_iter().map(|b| if b == 0xFF { 0xFE } else { b }));
     v.extend([0xFF, 0xD9]);
+    v
+}
+
+/// JPEG sin marcador de fin (como algunos originales guardados así en iCloud).
+pub fn jpeg_atipico(n: usize) -> Vec<u8> {
+    let mut v = jpeg(n);
+    v.truncate(v.len() - 2);
     v
 }
 

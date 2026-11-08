@@ -42,6 +42,30 @@ fn detecta_archivos_danados_y_ausentes_y_los_reprograma() {
 }
 
 #[test]
+fn atipico_confirmado_se_reverifica_por_sha_sin_estructura() {
+    let j = jpeg_atipico(400);
+    let s = servidor(vec![("/j", Comportamiento::Servir(j.clone()))]);
+    let f8 = "2026-08-10T19:37:18-04:00";
+    let mut f = FuenteFalsa { assets: vec![asset("A1", "IMG_A", f8, "PrimarySync", vec![parte(TipoParte::Original, &j, s.url("/j"), "JPG")])], ..Default::default() };
+    let d = tempfile::tempdir().unwrap();
+    let reg = Mutex::new(Registro::en_memoria().unwrap());
+    let op = OpcionesRonda { concurrencia: 1, mes: None };
+    motor::ejecutar_ronda(d.path(), &reg, &mut f, &descarga::cliente(), &op, &AtomicBool::new(false), &|_: Avance| {}).unwrap();
+    assert_eq!(reg.lock().unwrap().resumen().unwrap().estructura_atipica, 1);
+
+    let r = auditoria::verificar_todo(d.path(), &reg, &AtomicBool::new(false), &|_, _| {}).unwrap();
+    assert_eq!((r.revisadas, r.malas.len()), (1, 0), "{:?}", r.malas);
+
+    let ruta = d.path().join(r"2026\2026-08\IMG_A.JPG");
+    let mut danado = j.clone();
+    danado[100] ^= 0x01;
+    std::fs::write(&ruta, &danado).unwrap();
+    let r = auditoria::verificar_todo(d.path(), &reg, &AtomicBool::new(false), &|_, _| {}).unwrap();
+    assert_eq!(r.malas.len(), 1);
+    assert!(r.malas[0].1.contains("SHA-256"), "{:?}", r.malas);
+}
+
+#[test]
 fn archivo_danado_se_vuelve_a_descargar_y_no_se_readopta() {
     let b = jpeg(400);
     let s = servidor(vec![("/b", Comportamiento::Servir(b.clone()))]);

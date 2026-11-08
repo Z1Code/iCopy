@@ -25,7 +25,7 @@ pub fn verificar_todo(
         if cancelar.load(Ordering::Relaxed) {
             break;
         }
-        let motivo = match verificar::verificar_archivo(&destino.join(&p.ruta), p.tamano, &p.extension) {
+        let motivo = match verificar::reverificar(&destino.join(&p.ruta), p.tamano, &p.extension, p.estructura_atipica) {
             Ok(sha) if sha == p.sha256 => None,
             Ok(_) => Some("el contenido cambió (SHA-256 distinto)".to_string()),
             Err(f) => Some(f.to_string()),

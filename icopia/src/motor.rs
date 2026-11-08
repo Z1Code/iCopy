@@ -61,7 +61,16 @@ pub enum ErrorParte {
     Ruta(String),
     Disco(String),
     Registro(String),
+    /// Estructura atípica y la segunda descarga no dio los mismos bytes que la primera.
+    NoCoinciden,
     Cancelada,
+}
+
+/// Parte copiada y verificada. `atipica`: estructura no estándar en iCloud, confirmada por doble descarga.
+#[derive(Debug)]
+struct Verificada {
+    sha: String,
+    atipica: bool,
 }
 
 impl fmt::Display for ErrorParte {
@@ -72,6 +81,7 @@ impl fmt::Display for ErrorParte {
             ErrorParte::Ruta(m) => write!(f, "ruta: {m}"),
             ErrorParte::Disco(m) => write!(f, "disco: {m}"),
             ErrorParte::Registro(m) => write!(f, "registro: {m}"),
+            ErrorParte::NoCoinciden => write!(f, "las dos descargas no coinciden"),
             ErrorParte::Cancelada => write!(f, "cancelada"),
         }
     }
@@ -254,8 +264,8 @@ pub fn ejecutar_ronda(
                 avance(Avance::Copiando { hechas: hechas.load(Ordering::Relaxed), total, actual: actual.clone() });
                 let renovada = renovador.renovadas.lock().unwrap().get(&(t.asset_id.clone(), t.tipo)).copied();
                 match procesar_parte(destino, registro, http, &t, cancelar) {
-                    Ok(sha) => {
-                        if let Err(e) = registro.lock().unwrap().marcar_verificada(&t.asset_id, t.tipo, &sha) {
+                    Ok(v) => {
+                        if let Err(e) = registro.lock().unwrap().marcar_verificada_con(&t.asset_id, t.tipo, &v.sha, v.atipica) {
                             bitacora::escribir(&dir_datos, &format!("ERROR registro {}: {e:#}", t.asset_id));
                         }
                         verificadas.fetch_add(1, Ordering::Relaxed);
@@ -437,7 +447,7 @@ fn renovar_enlaces(
     }
 }
 
-fn procesar_parte(destino: &Path, registro: &Mutex<Registro>, http: &Client, t: &TrabajoParte, cancelar: &AtomicBool) -> Result<String, ErrorParte> {
+fn procesar_parte(destino: &Path, registro: &Mutex<Registro>, http: &Client, t: &TrabajoParte, cancelar: &AtomicBool) -> Result<Verificada, ErrorParte> {
     let rel = match &t.ruta {
         Some(r) => r.clone(),
         None => {
@@ -462,34 +472,88 @@ fn procesar_parte(destino: &Path, registro: &Mutex<Registro>, http: &Client, t: 
     // el archivo final si es exactamente el `.part` que se verificó (mismo SHA-256 anotado).
     if let Some(esperado) = &t.sha_pendiente {
         if final_.exists() {
-            if let Ok(sha) = verificar::verificar_archivo(&final_, t.tamano, &t.extension) {
+            let v = if t.estructura_atipica {
+                verificar::verificar_archivo_sin_estructura(&final_, t.tamano)
+            } else {
+                verificar::verificar_archivo(&final_, t.tamano, &t.extension)
+            };
+            if let Ok(sha) = v {
                 if &sha == esperado {
-                    return Ok(sha);
+                    return Ok(Verificada { sha, atipica: t.estructura_atipica });
                 }
             }
         }
     }
     let part = descarga::ruta_part(&final_);
     let identidad = format!("{}:{}", t.tamano, t.checksum);
-    descarga::descargar(http, &t.url, &part, t.tamano, &identidad, cancelar).map_err(|e| match e {
-        ErrorDescarga::Cancelada => ErrorParte::Cancelada,
-        otro => ErrorParte::Descarga(otro),
-    })?;
-    match verificar::verificar_archivo(&part, t.tamano, &t.extension) {
-        Ok(sha) => {
-            registro
-                .lock()
-                .unwrap()
-                .anotar_sha_pendiente(&t.asset_id, t.tipo, &sha)
-                .map_err(|e| ErrorParte::Registro(e.to_string()))?;
-            std::fs::rename(&part, &final_).map_err(|e| ErrorParte::Disco(e.to_string()))?;
-            let _ = std::fs::remove_file(descarga::ruta_meta(&part));
-            Ok(sha)
-        }
+    descarga::descargar(http, &t.url, &part, t.tamano, &identidad, cancelar).map_err(error_descarga)?;
+    let (sha, atipica) = match verificar::verificar_archivo(&part, t.tamano, &t.extension) {
+        Ok(sha) => (sha, false),
+        // Tamaño exacto pero estructura no estándar: puede ser el original tal como lo guarda Apple
+        // (p. ej. JPEG sin EOI guardados desde WhatsApp). Se acepta solo si una segunda descarga
+        // independiente da exactamente los mismos bytes.
+        Err(FalloVerificacion::Estructura(_)) => (confirmar_por_doble_descarga(destino, http, t, &part, &final_, &identidad, cancelar)?, true),
         Err(f) => {
             descarga::borrar_part(&part);
-            Err(ErrorParte::Verificacion(f))
+            return Err(ErrorParte::Verificacion(f));
         }
+    };
+    registro
+        .lock()
+        .unwrap()
+        .anotar_sha_pendiente(&t.asset_id, t.tipo, &sha, atipica)
+        .map_err(|e| ErrorParte::Registro(e.to_string()))?;
+    std::fs::rename(&part, &final_).map_err(|e| ErrorParte::Disco(e.to_string()))?;
+    let _ = std::fs::remove_file(descarga::ruta_meta(&part));
+    Ok(Verificada { sha, atipica })
+}
+
+fn error_descarga(e: ErrorDescarga) -> ErrorParte {
+    match e {
+        ErrorDescarga::Cancelada => ErrorParte::Cancelada,
+        otro => ErrorParte::Descarga(otro),
+    }
+}
+
+/// `<final>.part2`: segunda descarga independiente para confirmar un archivo de estructura atípica.
+pub fn ruta_part2(final_: &Path) -> std::path::PathBuf {
+    let mut s = final_.as_os_str().to_owned();
+    s.push(".part2");
+    s.into()
+}
+
+/// Descarga otra vez la parte desde el byte 0 en `<final>.part2` (petición nueva, sin reanudar) y
+/// compara SHA-256. Iguales: devuelve el SHA (el `.part` queda listo para renombrar). Distintas: borra
+/// las dos. Si la segunda descarga falla (red, enlace caducado, cancelada), el `.part` se conserva
+/// para el siguiente intento y el `.part2` se descarta.
+fn confirmar_por_doble_descarga(
+    destino: &Path,
+    http: &Client,
+    t: &TrabajoParte,
+    part: &Path,
+    final_: &Path,
+    identidad: &str,
+    cancelar: &AtomicBool,
+) -> Result<String, ErrorParte> {
+    let part2 = ruta_part2(final_);
+    descarga::borrar_part(&part2);
+    let segunda = descarga::descargar(http, &t.url, &part2, t.tamano, &format!("{identidad}:2"), cancelar);
+    let comparar = segunda.map_err(error_descarga).and_then(|_| {
+        let a = verificar::verificar_archivo_sin_estructura(part, t.tamano).map_err(ErrorParte::Verificacion)?;
+        let b = verificar::verificar_archivo_sin_estructura(&part2, t.tamano).map_err(ErrorParte::Verificacion)?;
+        Ok((a, b))
+    });
+    descarga::borrar_part(&part2);
+    let (a, b) = comparar?;
+    let dir_datos = destino.join(".icopia");
+    let quien = format!("{} ({})", t.nombre_base, t.tipo.como_str());
+    if a == b {
+        bitacora::escribir(&dir_datos, &format!("ATIPICO {quien}: estructura no estándar en iCloud; confirmado por doble descarga"));
+        Ok(a)
+    } else {
+        bitacora::escribir(&dir_datos, &format!("ATIPICO {quien}: estructura no estándar en iCloud; las dos descargas no coinciden"));
+        descarga::borrar_part(part);
+        Err(ErrorParte::NoCoinciden)
     }
 }
 

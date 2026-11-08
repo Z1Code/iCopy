@@ -17,6 +17,8 @@ pub struct PlanLiberar {
     /// Con datos en iCloud que icopia aún no sabe copiar.
     pub no_liberables: u64,
     pub bytes: u64,
+    /// Partes de los listos con estructura atípica, confirmadas por doble descarga.
+    pub atipicos: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -36,11 +38,12 @@ pub fn preparar(destino: &Path, registro: &Mutex<Registro>, mantener_dias: u32, 
     };
     let candidatos = c.candidatos;
     let total = candidatos.len();
-    let mut plan = PlanLiberar { listos: vec![], excluidos: vec![], no_verificados: c.no_verificados, no_liberables: c.no_liberables, bytes: 0 };
+    let mut plan = PlanLiberar { listos: vec![], excluidos: vec![], no_verificados: c.no_verificados, no_liberables: c.no_liberables, bytes: 0, atipicos: 0 };
     for (i, c) in candidatos.into_iter().enumerate() {
         match motivo_exclusion(destino, &c) {
             None => {
                 plan.bytes += c.partes.iter().map(|p| p.tamano).sum::<u64>();
+                plan.atipicos += c.partes.iter().filter(|p| p.estructura_atipica).count() as u64;
                 plan.listos.push(c);
             }
             Some(m) => plan.excluidos.push((c, m)),
@@ -52,7 +55,7 @@ pub fn preparar(destino: &Path, registro: &Mutex<Registro>, mantener_dias: u32, 
 
 fn motivo_exclusion(destino: &Path, c: &Candidato) -> Option<String> {
     for p in &c.partes {
-        match verificar::verificar_archivo(&destino.join(&p.ruta), p.tamano, &p.extension) {
+        match verificar::reverificar(&destino.join(&p.ruta), p.tamano, &p.extension, p.estructura_atipica) {
             Ok(sha) if sha == p.sha256 => {}
             Ok(_) => return Some(format!("{}: el contenido cambió (SHA-256 distinto)", p.ruta)),
             Err(f) => return Some(format!("{}: {f}", p.ruta)),

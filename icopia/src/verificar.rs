@@ -37,6 +37,30 @@ pub fn verificar_archivo(ruta: &Path, tamano_esperado: u64, extension: &str) -> 
     let mut f = File::open(ruta).map_err(lectura)?;
     comprobar_estructura(&mut f, meta.len(), extension)?;
     f.seek(SeekFrom::Start(0)).map_err(lectura)?;
+    sha256(&mut f)
+}
+
+/// Tamaño exacto + SHA-256, sin mirar la estructura. Solo para partes con estructura atípica ya
+/// confirmadas por doble descarga (el original en iCloud es así): su SHA-256 anotado es la referencia.
+pub fn verificar_archivo_sin_estructura(ruta: &Path, tamano_esperado: u64) -> Result<String, FalloVerificacion> {
+    let meta = std::fs::metadata(ruta).map_err(|_| FalloVerificacion::NoExiste)?;
+    if meta.len() != tamano_esperado {
+        return Err(FalloVerificacion::Tamano { esperado: tamano_esperado, real: meta.len() });
+    }
+    sha256(&mut File::open(ruta).map_err(lectura)?)
+}
+
+/// Re-verificación de una parte ya verificada: las de estructura atípica (confirmadas por doble
+/// descarga) solo por tamaño y SHA-256; el resto, con la comprobación estructural completa.
+pub fn reverificar(ruta: &Path, tamano_esperado: u64, extension: &str, estructura_atipica: bool) -> Result<String, FalloVerificacion> {
+    if estructura_atipica {
+        verificar_archivo_sin_estructura(ruta, tamano_esperado)
+    } else {
+        verificar_archivo(ruta, tamano_esperado, extension)
+    }
+}
+
+fn sha256(f: &mut File) -> Result<String, FalloVerificacion> {
     let mut h = Sha256::new();
     let mut buf = vec![0u8; 1 << 20];
     loop {
