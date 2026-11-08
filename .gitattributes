@@ -1,0 +1,4 @@
+# Scripts y archivos de macOS: siempre LF (bash y plutil no aceptan CRLF).
+*.sh            text eol=lf
+*.plist         text eol=lf
+*.entitlements  text eol=lf
