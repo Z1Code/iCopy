@@ -139,8 +139,8 @@ fn main() {
         asistente_gdi::pintar(&mut l, &a, oscuro, escala, t, ahora);
         let px = l.pixeles();
         let mut rgba = vec![0u8; (w * h * 4) as usize];
-        for (d, s) in rgba.chunks_exact_mut(4).zip(px.chunks_exact(4)) {
-            d.copy_from_slice(&[s[2], s[1], s[0], 255]);
+        for (d, s) in rgba.as_chunks_mut::<4>().0.iter_mut().zip(px.as_chunks::<4>().0) {
+            *d = [s[2], s[1], s[0], 255];
         }
         let archivo = std::fs::File::create(&salida).unwrap();
         let mut enc = png::Encoder::new(archivo, w as u32, h as u32);

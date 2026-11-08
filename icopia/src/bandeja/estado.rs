@@ -114,13 +114,9 @@ impl EstadoUi {
     /// Porcentaje copiado y verificado (por bytes si se conocen; si no, por archivos).
     pub fn porcentaje(&self) -> Option<u64> {
         let d = &self.detalle;
-        if d.bytes_total > 0 {
-            Some(d.bytes_verificados * 100 / d.bytes_total)
-        } else if self.total > 0 {
-            Some(self.verificadas * 100 / self.total)
-        } else {
-            None
-        }
+        (d.bytes_verificados * 100)
+            .checked_div(d.bytes_total)
+            .or_else(|| (self.verificadas * 100).checked_div(self.total))
     }
 
     fn progreso(&self) -> String {
@@ -166,6 +162,20 @@ impl EstadoUi {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn porcentaje_por_bytes_y_si_no_por_archivos() {
+        let mut e = EstadoUi::sin_datos(Fase::Inactiva);
+        assert_eq!(e.porcentaje(), None, "sin datos");
+        e.verificadas = 1;
+        e.total = 4;
+        assert_eq!(e.porcentaje(), Some(25), "por archivos");
+        e.detalle.bytes_verificados = 3;
+        e.detalle.bytes_total = 4;
+        assert_eq!(e.porcentaje(), Some(75), "los bytes mandan si se conocen");
+        e.detalle.bytes_total = 0;
+        assert_eq!(e.porcentaje(), Some(25), "bytes sin total: vuelve a archivos");
+    }
 
     #[test]
     fn formato_miles() {
