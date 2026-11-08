@@ -36,7 +36,7 @@ jobs:
       - name: Notas del CHANGELOG
         run: |
           $lineas = Get-Content CHANGELOG.md
-          $ini = [array]::IndexOf($lineas, ($lineas | Where-Object { $_ -like "## [$env:VERSION]*" } | Select-Object -First 1))
+          $ini = [array]::IndexOf($lineas, ($lineas | Where-Object { $_.StartsWith("## [$env:VERSION]") } | Select-Object -First 1))
           if ($ini -lt 0) { throw "CHANGELOG.md no tiene la sección [$env:VERSION]" }
           $fin = $ini + 1
           while ($fin -lt $lineas.Count -and -not $lineas[$fin].StartsWith("## [")) { $fin++ }
