@@ -3,7 +3,9 @@ use anyhow::Context;
 use icopia::bandeja::asistente::{Accion as AccionAsistente, Asistente, Paso, Revision};
 use icopia::bandeja::asistente_ventana::VentanaAsistente;
 use icopia::bandeja::estado::{EstadoUi, EventoUi, Fase};
-use icopia::i18n::{t, T};
+use icopia::actualizar::{self, momento_tranquilo, Momento};
+use icopia::bandeja::hilo_actualizar::{self, EventoActualizacion};
+use icopia::i18n::{t, tf, T};
 use icopia::liberar::ControlBorrado;
 use icopia::bandeja::panel::Principal;
 use icopia::bandeja::hover::Rect;
@@ -28,7 +30,12 @@ enum Ev {
     Bandeja(TrayIconEvent),
     /// Lectura fresca del registro: totales (solo con el panel abierto) y avance de "liberar espacio".
     Lectura { progreso: Option<icopia::registro::Progreso>, liberar: Option<ProgresoLiberar> },
+    Actualizacion(EventoActualizacion),
 }
+
+/// Procesos hijos con ventana propia abiertos ahora (la de inicio de sesión): una actualización
+/// automática no debe cerrárselos a la persona.
+static HIJOS_ABIERTOS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Menú contextual del icono. Para que se cierre al hacer clic fuera, su ventana dueña tiene que
 /// estar en primer plano antes de TrackPopupMenu, y después hay que enviarle WM_NULL
@@ -117,8 +124,10 @@ fn lanzar_pausando(mut cmd: std::process::Command, tx: &mpsc::Sender<Orden>, can
         cancelar.store(true, Ordering::SeqCst);
     }
     let tx = tx.clone();
+    HIJOS_ABIERTOS.fetch_add(1, Ordering::SeqCst);
     std::thread::spawn(move || {
         let _ = cmd.status();
+        HIJOS_ABIERTOS.fetch_sub(1, Ordering::SeqCst);
         if !ya_pausado {
             let _ = tx.send(Orden::Reanudar);
         }
@@ -171,6 +180,15 @@ fn main() {
             let _ = proxy.lock().unwrap().send_event(Ev::Ui(e));
         }),
     );
+    // Actualizaciones: un hilo busca y descarga (verificando la firma); el bucle decide cuándo instalar.
+    let (tx_buscar, rx_buscar) = mpsc::channel::<()>();
+    let actualizaciones_permitidas = actualizar::permitidas();
+    if actualizaciones_permitidas {
+        let proxy_act = Mutex::new(event_loop.create_proxy());
+        hilo_actualizar::lanzar(rx_buscar, config::dir_app().join("actualizaciones"), move |e| {
+            let _ = proxy_act.lock().unwrap().send_event(Ev::Actualizacion(e));
+        });
+    }
     // Sin Apple ID se pide iniciar sesión ya. Con uno, la primera ronda del motor (en su hilo)
     // comprueba la sesión y, si caducó, se abre la ventana desde el bucle (una vez por caducidad).
     let mut login_abierto = cfg.apple_id.is_none();
@@ -188,6 +206,8 @@ fn main() {
     let i_destino = MenuItem::new(t(T::MenuDestino), true, None);
     let i_login = MenuItem::new(t(T::MenuSesion), true, None);
     let i_auto = CheckMenuItem::new(t(T::MenuAuto), true, autoarranque::activo(), None);
+    let i_act_auto = CheckMenuItem::new(t(T::MenuActAuto), actualizaciones_permitidas, cfg.actualizar_auto, None);
+    let i_buscar = MenuItem::new(t(T::MenuBuscarAct), actualizaciones_permitidas, None);
     let i_salir = MenuItem::new(t(T::MenuSalir), true, None);
     let menu = Menu::new();
     menu.append_items(&[
@@ -204,6 +224,8 @@ fn main() {
         &i_destino,
         &i_login,
         &i_auto,
+        &i_act_auto,
+        &i_buscar,
         &PredefinedMenuItem::separator(),
         &i_salir,
     ])
@@ -220,6 +242,12 @@ fn main() {
     let mut liberar: Option<ProgresoLiberar> = None;
     let mut asistente: Option<VentanaAsistente> = None;
     let mut ultimo_asistente = Instant::now();
+    // Actualización lista para instalar (versión, paquete), la última versión avisada y el control del reintento.
+    let mut pendiente: Option<(String, std::path::PathBuf)> = None;
+    let mut avisada: Option<String> = None;
+    let mut instalar_ahora: Option<std::path::PathBuf> = None;
+    let mut fallo_al_instalar = false;
+    let mut ultimo_chequeo_act = Instant::now();
     // Abre (o trae al frente) el asistente de liberar espacio con el inventario actual del registro.
     let abrir_asistente = |asistente: &mut Option<VentanaAsistente>, destino_ev: &tao::event_loop::EventLoopWindowTarget<Ev>, liberar: &Option<ProgresoLiberar>| {
         let inventario = || {
@@ -374,6 +402,22 @@ fn main() {
                     p.poner_liberar(liberar.clone());
                 }
             }
+            Event::UserEvent(Ev::Actualizacion(ev)) => match ev {
+                EventoActualizacion::Lista { version, paquete } => {
+                    i_buscar.set_text(tf(T::MenuActualizarA, &[("v", &version)]));
+                    pendiente = Some((version.clone(), paquete));
+                    fallo_al_instalar = false;
+                    // Un solo aviso por versión, aunque se vuelva a buscar.
+                    if avisada.as_deref() != Some(version.as_str()) {
+                        let auto = Config::cargar().map(|c| c.actualizar_auto).unwrap_or(true);
+                        let texto = tf(if auto { T::AvActLista } else { T::AvActListaManual }, &[("v", &version)]);
+                        avisos::mostrar(t(T::AvActTitulo), &texto);
+                        avisada = Some(version);
+                    }
+                }
+                EventoActualizacion::AlDia => avisos::mostrar(t(T::AvActTitulo), &tf(T::AvActAlDia, &[("v", &actualizar::VERSION)])),
+                EventoActualizacion::Error(e) => avisos::mostrar(t(T::AvActTitulo), &tf(T::AvActError, &[("e", &e)])),
+            },
             Event::UserEvent(Ev::Ui(EventoUi::Aviso { titulo, texto })) => avisos::mostrar(&titulo, &texto),
             Event::UserEvent(Ev::Ui(EventoUi::Liberar(e))) => {
                 if let Some(a) = asistente.as_mut() {
@@ -527,11 +571,63 @@ fn main() {
                 }
             } else if id == *i_auto.id() {
                 let _ = autoarranque::fijar(i_auto.is_checked());
+            } else if id == *i_act_auto.id() {
+                let mut c = Config::cargar().unwrap_or_default();
+                c.actualizar_auto = i_act_auto.is_checked();
+                let _ = c.guardar();
+            } else if id == *i_buscar.id() {
+                match &pendiente {
+                    // Ya descargada y verificada: instalar (la copia, si la hay, se reanuda sola después)...
+                    Some((_, paquete)) => {
+                        if hilo_actualizar::liberando(liberar.as_ref(), chrono::Utc::now().timestamp()) {
+                            // ...salvo mientras se borra en iCloud.
+                            avisos::mostrar(t(T::AvActTitulo), t(T::AvActLiberando));
+                        } else {
+                            instalar_ahora = Some(paquete.clone());
+                        }
+                    }
+                    None => {
+                        let _ = tx_buscar.send(());
+                    }
+                }
             } else if id == *i_salir.id() {
                 cancelar.store(true, Ordering::SeqCst);
                 let _ = tx.send(Orden::Salir);
                 tray.take();
                 *control_flow = ControlFlow::Exit;
+            }
+        }
+        // Instalación automática: solo cuando no hay nada en marcha ni ventanas abiertas.
+        if instalar_ahora.is_none() && !fallo_al_instalar && ultimo_chequeo_act.elapsed() >= Duration::from_secs(5) {
+            ultimo_chequeo_act = Instant::now();
+            if let Some((_, paquete)) = &pendiente {
+                if Config::cargar().map(|c| c.actualizar_auto).unwrap_or(true) {
+                    let momento = Momento {
+                        copiando: matches!(estado.fase, Fase::Listando { .. } | Fase::Copiando { .. } | Fase::Verificando { .. }),
+                        pausado,
+                        liberando: hilo_actualizar::liberando(liberar.as_ref(), chrono::Utc::now().timestamp()),
+                        ventana_abierta: HIJOS_ABIERTOS.load(Ordering::SeqCst) > 0
+                            || asistente.as_ref().is_some_and(|a| a.visible() || a.modelo.ocupado()),
+                    };
+                    if momento_tranquilo(momento) {
+                        instalar_ahora = Some(paquete.clone());
+                    }
+                }
+            }
+        }
+        if let Some(paquete) = instalar_ahora.take() {
+            match actualizar::aplicar(&paquete) {
+                // El instalador cierra lo que quede, reemplaza los archivos y vuelve a abrir iCopy.
+                Ok(()) => {
+                    cancelar.store(true, Ordering::SeqCst);
+                    let _ = tx.send(Orden::Salir);
+                    tray.take();
+                    *control_flow = ControlFlow::Exit;
+                }
+                Err(e) => {
+                    fallo_al_instalar = true;
+                    avisos::mostrar(t(T::AvActTitulo), &tf(T::AvActError, &[("e", &format!("{e:#}"))]));
+                }
             }
         }
     });

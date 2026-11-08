@@ -12,6 +12,8 @@ pub struct Config {
     pub intervalo_horas: u64,
     /// Servidores de iCloud: `com` (todo el mundo) o `cn` (cuentas de China continental).
     pub dominio: Dominio,
+    /// Instalar solas las actualizaciones cuando no haya nada en marcha.
+    pub actualizar_auto: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -33,7 +35,7 @@ impl Dominio {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { destino: None, apple_id: None, mantener_dias: 30, concurrencia: 3, intervalo_horas: 4, dominio: Dominio::Com }
+        Config { destino: None, apple_id: None, mantener_dias: 30, concurrencia: 3, intervalo_horas: 4, dominio: Dominio::Com, actualizar_auto: true }
     }
 }
 
@@ -116,5 +118,13 @@ mod tests {
         assert_eq!(c.apple_id.as_deref(), Some("yo@x.com"));
         assert_eq!(c.mantener_dias, 30);
         assert_eq!(c.concurrencia, 3);
+    }
+
+    #[test]
+    fn configuracion_antigua_actualiza_sola_por_defecto() {
+        let c: Config = serde_json::from_str(r#"{"apple_id":"yo@x.com","mantener_dias":60}"#).unwrap();
+        assert!(c.actualizar_auto);
+        let c: Config = serde_json::from_str(r#"{"actualizar_auto":false}"#).unwrap();
+        assert!(!c.actualizar_auto);
     }
 }

@@ -273,6 +273,9 @@ textos! {
     MenuDestino => "Cambiar destino…", "Change destination…";
     MenuSesion => "Iniciar sesión en iCloud…", "Sign in to iCloud…";
     MenuAuto => "Iniciar con Windows", "Start with Windows";
+    MenuBuscarAct => "Buscar actualizaciones", "Check for updates";
+    MenuActualizarA => "Reiniciar y actualizar a {v}", "Restart and update to {v}";
+    MenuActAuto => "Actualizar automáticamente", "Update automatically";
     MenuSalir => "Salir", "Quit";
     DlgDestino => "icopia: elige dónde guardar las fotos", "icopia: choose where to save the photos";
     DlgNuevoDestino => "icopia: nueva carpeta destino", "icopia: new destination folder";
@@ -287,7 +290,13 @@ textos! {
     AvRenovando => "Renovando enlaces ({n})…", "Renewing links ({n})…";
     AvLiberado => "Espacio liberado: {b} ({n} elementos). Vacía «Eliminado recientemente» en el iPhone para recuperarlo.", "Space freed up: {b} ({n} items). Empty “Recently Deleted” on your iPhone to get it back.";
     AvLiberarFallo => "No se pudo liberar espacio: {e}", "Couldn't free up space: {e}";
-    AvRestaurados => "Restaurados {n} elementos en iCloud", "Restored {n} items in iCloud";
+    AvActTitulo => "Actualización de iCopy", "iCopy update";
+    AvActLista => "iCopy {v} está lista. Se instalará cuando no esté copiando.", "iCopy {v} is ready. It will install when nothing is being copied.";
+    AvActListaManual => "iCopy {v} está lista. Menú del icono → Reiniciar y actualizar.", "iCopy {v} is ready. Icon menu → Restart and update.";
+    AvActAlDia => "Tienes la última versión ({v}).", "You have the latest version ({v}).";
+    AvActError => "No se pudo buscar la actualización: {e}", "Couldn't check for updates: {e}";
+    AvActLiberando => "Se actualizará al terminar de liberar espacio.", "It will update after freeing up space finishes.";
+    AvRestaurados =>"Restaurados {n} elementos en iCloud", "Restored {n} items in iCloud";
     // Inicio de sesión
     LogVentana => "Iniciar sesión · icopia", "Sign in · icopia";
     LogTitulo => "Inicia sesión en iCloud", "Sign in to iCloud";
