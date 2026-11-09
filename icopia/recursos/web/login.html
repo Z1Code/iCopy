@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>iCopy</title>
+<style>
+  :root {
+    --fondo: #f3f3f3; --tarjeta: #fbfbfb; --borde: #e0e0e0; --texto: #1b1b1b; --sec: #606060;
+    --acento: #005fb8; --acento-hover: #0054a3; --sobre-acento: #fff; --campo: #fff; --campo-borde: #d0d0d0;
+    --foco: rgba(0, 95, 184, .35); --error: #c42b1c; --error-fondo: #fde7e9; --ok: #0f7b0f; --boton: #fbfbfb;
+    --boton-hover: #f0f0f0; --sombra: 0 1px 2px rgba(0,0,0,.06), 0 8px 24px rgba(0,0,0,.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-tema="claro"]) {
+      --fondo: #242424; --tarjeta: #2d2d2d; --borde: #383838; --texto: #fff; --sec: #c8c8c8;
+      --acento: #0a84ff; --acento-hover: #3395ff; --campo: #1f1f1f; --campo-borde: #4a4a4a;
+      --foco: rgba(10, 132, 255, .45); --error: #ff99a4; --error-fondo: rgba(255, 99, 112, .14); --ok: #6ccb5f;
+      --boton: #373737; --boton-hover: #404040; --sombra: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.25);
+    }
+  }
+  :root[data-tema="claro"] { color-scheme: light; }
+  :root[data-tema="oscuro"] {
+    --fondo: #242424; --tarjeta: #2d2d2d; --borde: #383838; --texto: #fff; --sec: #c8c8c8;
+    --acento: #0a84ff; --acento-hover: #3395ff; --campo: #1f1f1f; --campo-borde: #4a4a4a;
+    --foco: rgba(10, 132, 255, .45); --error: #ff99a4; --error-fondo: rgba(255, 99, 112, .14); --ok: #6ccb5f;
+    --boton: #373737; --boton-hover: #404040; --sombra: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.25);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--fondo); color: var(--texto);
+    font: 14px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased; user-select: none; -webkit-user-select: none; cursor: default;
+    display: flex; flex-direction: column;
+  }
+  main { flex: 1; display: flex; flex-direction: column; padding: 36px 36px 28px; }
+  .cabecera { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 10px; margin-bottom: 26px; }
+  .icono { width: 64px; height: 64px; border-radius: 15px; box-shadow: 0 4px 14px rgba(0, 95, 184, .25); }
+  h1 { margin: 6px 0 0; font-size: 21px; font-weight: 650; letter-spacing: -.01em; }
+  .sub { margin: 0; color: var(--sec); font-size: 13.5px; max-width: 352px; }
+  form { display: flex; flex-direction: column; gap: 14px; }
+  label { display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; font-weight: 600; color: var(--sec); }
+  input {
+    font: inherit; font-size: 15px; color: var(--texto); background: var(--campo);
+    border: 1px solid var(--campo-borde); border-radius: 9px; padding: 10px 12px; outline: none;
+    transition: border-color .12s, box-shadow .12s; user-select: text; -webkit-user-select: text;
+  }
+  input:focus { border-color: var(--acento); box-shadow: 0 0 0 3px var(--foco); }
+  input:disabled { opacity: .6; }
+  .codigo { display: flex; justify-content: center; gap: 8px; margin-top: 4px; }
+  .codigo input {
+    width: 46px; height: 56px; padding: 0; text-align: center; font-size: 24px; font-weight: 600;
+    font-variant-numeric: tabular-nums; border-radius: 10px;
+  }
+  .codigo .hueco { width: 6px; }
+  .aviso { min-height: 20px; font-size: 13px; text-align: center; }
+  .aviso.error { color: var(--error); background: var(--error-fondo); border-radius: 8px; padding: 8px 10px; }
+  .aviso.info { color: var(--sec); }
+  .estado { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; text-align: center; }
+  .estado .marca { width: 52px; height: 52px; border-radius: 50%; display: grid; place-items: center; background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
+  .estado .marca svg { width: 28px; height: 28px; }
+  .estado p { margin: 0; color: var(--sec); max-width: 320px; }
+  .rueda { width: 26px; height: 26px; border-radius: 50%; border: 3px solid color-mix(in srgb, var(--acento) 22%, transparent); border-top-color: var(--acento); animation: girar .8s linear infinite; }
+  @keyframes girar { to { transform: rotate(360deg); } }
+  footer { display: flex; gap: 10px; justify-content: flex-end; padding: 16px 36px 24px; }
+  footer.centro { justify-content: center; }
+  button {
+    font: inherit; font-size: 14px; font-weight: 600; border-radius: 9px; padding: 9px 18px; min-width: 104px;
+    border: 1px solid var(--borde); background: var(--boton); color: var(--texto); cursor: default;
+    transition: background .12s, opacity .12s; display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  }
+  button:hover:not(:disabled) { background: var(--boton-hover); }
+  button.principal { background: var(--acento); border-color: transparent; color: var(--sobre-acento); }
+  button.principal:hover:not(:disabled) { background: var(--acento-hover); }
+  button:disabled { opacity: .55; }
+  button:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--foco); }
+  button .rueda { width: 14px; height: 14px; border-width: 2px; border-color: rgba(255,255,255,.35); border-top-color: #fff; }
+  .enlace { background: none; border: none; min-width: 0; padding: 4px 6px; color: var(--acento); font-weight: 500; }
+  .enlace:hover:not(:disabled) { background: none; text-decoration: underline; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <div class="cabecera">
+    <img class="icono" id="icono" alt="">
+    <h1 id="titulo"></h1>
+    <p class="sub" id="sub"></p>
+  </div>
+
+  <!-- Apple ID y contraseña -->
+  <form id="f-cred" hidden autocomplete="off">
+    <label><span id="l-id"></span><input id="apple-id" type="email" spellcheck="false" autocapitalize="off" autocomplete="username"></label>
+    <label><span id="l-pw"></span><input id="password" type="password" autocomplete="current-password"></label>
+    <div class="aviso" id="aviso-cred"></div>
+  </form>
+
+  <!-- Código de 6 dígitos -->
+  <form id="f-codigo" hidden autocomplete="off">
+    <div class="codigo" id="casillas"></div>
+    <div class="aviso" id="aviso-codigo"></div>
+  </form>
+
+  <!-- Comprobando / ya con sesión / listo -->
+  <div class="estado" id="estado" hidden>
+    <div class="rueda" id="e-rueda"></div>
+    <div class="marca" id="e-marca" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></div>
+    <p id="e-texto"></p>
+    <div class="aviso error" id="e-error" hidden></div>
+  </div>
+</main>
+<footer id="pie">
+  <button type="button" class="enlace" id="b-otra" hidden></button>
+  <span style="flex:1" id="separador" hidden></span>
+  <button type="button" id="b-secundario"></button>
+  <button type="button" class="principal" id="b-principal"></button>
+</footer>
+
+<script>
+(() => {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const ipc = window.ipc;
+  // Textos de botones y etiquetas: los pone Rust (i18n.rs) con window.icopy.textos antes de cargar.
+  const T = Object.assign({
+    LogAppleId: "Apple ID", LogContrasena: "Contraseña", LogCodigo: "Código de verificación",
+    LogCancelar: "Cancelar", LogEntrar: "Entrar", LogVerificar: "Verificar",
+    LogCambiar: "Cambiar de cuenta", LogCerrar: "Cerrar",
+  }, (window.icopy && window.icopy.textos) || {});
+
+  let paso = "";
+  let ocupado = false;
+
+  const enviar = (msg) => { if (ipc) ipc.postMessage(JSON.stringify(msg)); };
+
+  // Seis casillas con avance automático, retroceso, flechas y pegado.
+  const casillas = [];
+  for (let i = 0; i < 6; i++) {
+    if (i === 3) { const h = document.createElement("span"); h.className = "hueco"; $("casillas").appendChild(h); }
+    const c = document.createElement("input");
+    c.inputMode = "numeric"; c.maxLength = 1; c.setAttribute("aria-label", `${T.LogCodigo} ${i + 1}`);
+    c.addEventListener("input", () => {
+      const d = c.value.replace(/\D/g, "");
+      if (d.length > 1) { repartir(d, i); return; }
+      c.value = d;
+      if (d && i < 5) casillas[i + 1].focus();
+      revisarCodigo();
+    });
+    c.addEventListener("keydown", (e) => {
+      if (e.key === "Backspace" && !c.value && i > 0) { casillas[i - 1].value = ""; casillas[i - 1].focus(); e.preventDefault(); }
+      else if (e.key === "ArrowLeft" && i > 0) casillas[i - 1].focus();
+      else if (e.key === "ArrowRight" && i < 5) casillas[i + 1].focus();
+    });
+    c.addEventListener("paste", (e) => { e.preventDefault(); repartir((e.clipboardData.getData("text") || "").replace(/\D/g, ""), 0); });
+    c.addEventListener("focus", () => c.select());
+    casillas.push(c); $("casillas").appendChild(c);
+  }
+  function repartir(digitos, desde) {
+    for (let k = 0; k < digitos.length && desde + k < 6; k++) casillas[desde + k].value = digitos[k];
+    casillas[Math.min(5, desde + digitos.length)].focus();
+    revisarCodigo();
+  }
+  const codigo = () => casillas.map((c) => c.value).join("");
+  function revisarCodigo() {
+    const listo = codigo().length === 6;
+    $("b-principal").disabled = !listo || ocupado;
+    if (listo && !ocupado) principal(); // al completar el código se envía solo
+  }
+
+  function revisarCred() {
+    $("b-principal").disabled = ocupado || !$("apple-id").value.trim() || !$("password").value;
+  }
+  $("apple-id").addEventListener("input", revisarCred);
+  $("password").addEventListener("input", revisarCred);
+
+  function principal() {
+    if (ocupado || $("b-principal").disabled) return;
+    if (paso === "credenciales") {
+      enviar({ accion: "entrar", apple_id: $("apple-id").value.trim(), password: $("password").value });
+      $("password").value = ""; // la contraseña no se queda en la página
+    } else if (paso === "codigo") {
+      enviar({ accion: "codigo", codigo: codigo() });
+    } else {
+      enviar({ accion: "cerrar" });
+    }
+  }
+  $("b-principal").addEventListener("click", principal);
+  $("b-secundario").addEventListener("click", () => enviar({ accion: "cerrar" }));
+  $("b-otra").addEventListener("click", () => enviar({ accion: "otra_cuenta" }));
+  $("f-cred").addEventListener("submit", (e) => { e.preventDefault(); principal(); });
+  $("f-codigo").addEventListener("submit", (e) => { e.preventDefault(); principal(); });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { e.preventDefault(); enviar({ accion: "cerrar" }); }
+    else if (e.key === "Enter" && document.activeElement.tagName !== "BUTTON") { e.preventDefault(); principal(); }
+  });
+
+  function boton(b, texto, visible = true) {
+    b.hidden = !visible;
+    b.textContent = texto || "";
+  }
+
+  // Estado que manda Rust: {paso, titulo, sub, error, info, apple_id, ocupado}
+  function estado(s) {
+    const cambia = s.paso !== paso;
+    paso = s.paso; ocupado = !!s.ocupado;
+    $("titulo").textContent = s.titulo || "";
+    $("sub").textContent = s.sub || "";
+    $("f-cred").hidden = paso !== "credenciales";
+    $("f-codigo").hidden = paso !== "codigo";
+    const esEstado = ["comprobando", "ya", "listo", "fallo"].includes(paso);
+    $("estado").hidden = !esEstado;
+    $("e-rueda").hidden = paso !== "comprobando";
+    $("e-marca").hidden = !["ya", "listo"].includes(paso);
+    $("e-texto").textContent = esEstado ? (s.info || "") : "";
+    $("e-error").hidden = !(esEstado && s.error);
+    $("e-error").textContent = s.error || "";
+
+    const aviso = paso === "codigo" ? $("aviso-codigo") : $("aviso-cred");
+    for (const a of [$("aviso-cred"), $("aviso-codigo")]) { a.textContent = ""; a.className = "aviso"; }
+    if (!esEstado) {
+      if (s.error) { aviso.textContent = s.error; aviso.className = "aviso error"; }
+      else if (s.info) { aviso.textContent = s.info; aviso.className = "aviso info"; }
+    }
+
+    for (const i of [$("apple-id"), $("password"), ...casillas]) i.disabled = ocupado;
+    const pie = $("pie"), bp = $("b-principal"), bs = $("b-secundario"), bo = $("b-otra");
+    pie.className = ""; $("separador").hidden = true; bo.hidden = true;
+    if (paso === "credenciales") {
+      if (cambia && s.apple_id != null) $("apple-id").value = s.apple_id;
+      boton(bs, T.LogCancelar); boton(bp, T.LogEntrar); revisarCred();
+      if (cambia || s.error) ($("apple-id").value ? $("password") : $("apple-id")).focus();
+    } else if (paso === "codigo") {
+      if (cambia || s.error) { casillas.forEach((c) => (c.value = "")); casillas[0].focus(); }
+      boton(bs, T.LogCancelar); boton(bp, T.LogVerificar); bp.disabled = true;
+    } else if (paso === "ya") {
+      boton(bo, T.LogCambiar); $("separador").hidden = false; boton(bs, "", false); boton(bp, T.LogCerrar); bp.disabled = false; bp.focus();
+    } else if (paso === "listo") {
+      pie.className = "centro"; boton(bs, "", false); boton(bp, T.LogCerrar); bp.disabled = false; bp.focus();
+    } else if (paso === "fallo") {
+      pie.className = "centro"; boton(bs, "", false); boton(bp, T.LogCerrar); bp.disabled = false;
+    } else { // comprobando
+      pie.className = "centro"; boton(bs, T.LogCancelar); boton(bp, "", false);
+    }
+    if (ocupado && !bp.hidden) { bp.disabled = true; bp.insertAdjacentHTML("afterbegin", '<span class="rueda"></span>'); }
+  }
+
+  $("l-id").textContent = T.LogAppleId;
+  $("l-pw").textContent = T.LogContrasena;
+
+  window.icopy = Object.assign(window.icopy || {}, { estado });
+  $("icono").src = (window.icopy && window.icopy.icono) || "";
+  $("icono").hidden = !$("icono").src;
+  document.addEventListener("contextmenu", (e) => e.preventDefault());
+
+  // Demostración en un navegador (sin Rust): login.html?paso=codigo&tema=oscuro&ocupado=1&error=1
+  if (!ipc) {
+    const q = new URLSearchParams(location.search);
+    if (q.get("tema")) document.documentElement.dataset.tema = q.get("tema");
+    const p = q.get("paso") || "credenciales";
+    const ejemplos = {
+      comprobando: { titulo: "Inicia sesión en iCloud", sub: "", info: "Mirando si la sesión de yo@ejemplo.com sigue activa…" },
+      ya: { titulo: "Ya tienes sesión iniciada", sub: "", info: "Sesión activa como yo@ejemplo.com. iCopy te avisará cuando caduque." },
+      credenciales: { titulo: "Inicia sesión en iCloud", sub: "Usa tu Apple ID. La contraseña solo se envía a Apple; iCopy no la guarda.", apple_id: "yo@ejemplo.com" },
+      codigo: { titulo: "Código de verificación", sub: "Escribe el código de 6 dígitos que apareció en tu iPhone.", info: "Apple ha enviado un código a tu iPhone." },
+      listo: { titulo: "Sesión iniciada", sub: "", info: "Dura unos 2 meses; iCopy te avisará cuando caduque." },
+      fallo: { titulo: "Inicia sesión en iCloud", sub: "", info: "", error: "No pude comprobar la sesión: sin conexión" },
+    };
+    const s = Object.assign({ paso: p }, ejemplos[p] || ejemplos.credenciales);
+    if (q.get("error")) s.error = p === "codigo" ? "Código incorrecto, prueba otra vez." : "Apple ID o contraseña incorrectos";
+    if (q.get("ocupado")) { s.ocupado = true; s.info = p === "codigo" ? "Verificando el código…" : "Conectando con Apple…"; }
+    estado(s);
+    if (q.get("ocupado") && p === "codigo") repartir("482", 0);
+  }
+})();
+</script>
+</body>
+</html>
