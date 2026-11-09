@@ -125,6 +125,15 @@ fn vista_previa(ruta: &Path) {
 }
 
 fn main() {
+    // `--png <n> <archivo>`: solo un PNG de n×n px (para el .icns de macOS, hasta 1024).
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let [opcion, n, archivo] = args.as_slice() {
+        if opcion == "--png" {
+            let n: u32 = n.parse().expect("tamaño en píxeles");
+            std::fs::write(archivo, png(&icono::pintar(n, APP), n, n)).unwrap();
+            return;
+        }
+    }
     let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
     std::fs::create_dir_all(&assets).unwrap();
     std::fs::write(assets.join("icopia.ico"), ico()).unwrap();
