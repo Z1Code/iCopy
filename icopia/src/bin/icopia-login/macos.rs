@@ -171,7 +171,7 @@ pub fn main() {
     let proxy_pagina = event_loop.create_proxy();
     let webview = WebViewBuilder::new()
         .with_html(HTML)
-        .with_initialization_script(&script_inicial())
+        .with_initialization_script(script_inicial())
         .with_devtools(cfg!(debug_assertions))
         // Solo la página propia: nada de navegar a otros sitios.
         .with_navigation_handler(|url| url.starts_with("about:") || url.starts_with("data:"))
