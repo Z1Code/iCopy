@@ -5,6 +5,10 @@ use std::path::PathBuf;
 fn main() {
     println!("cargo:rerun-if-changed=recursos/icopia.manifest");
     println!("cargo:rerun-if-changed=assets/icopia.ico");
+    // Icono, manifiesto y VERSIONINFO son recursos de Windows; en macOS van en el bundle (Info.plist).
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
     let dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let ruta = |p: &str| dir.join(p).display().to_string().replace('\\', "\\\\");
     let v = |n: &str| std::env::var(format!("CARGO_PKG_VERSION_{n}")).unwrap();
