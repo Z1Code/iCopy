@@ -31,7 +31,7 @@ pub fn rgba(color: Color, n: u32) -> (Vec<u8>, u32, u32) {
 /// transparente; el sistema lo tiñe según el tema. Sale del glifo blanco del icono normal.
 pub fn plantilla(n: u32) -> Vec<u8> {
     let (rgba, _, _) = rgba(Color::Azul, n);
-    rgba.chunks_exact(4)
+    rgba.as_chunks::<4>().0.iter()
         .flat_map(|p| {
             // Lo blanco (glifo) tiene sus tres canales altos; el fondo de color, no.
             let blanco = p[0].min(p[1]).min(p[2]) as f32 / 255.0;
@@ -189,9 +189,9 @@ mod tests {
         let n = 44;
         let v = plantilla(n);
         assert_eq!(v.len(), (n * n * 4) as usize);
-        assert!(v.chunks_exact(4).all(|p| p[..3] == [0, 0, 0]), "todo negro");
-        let opacos = v.chunks_exact(4).filter(|p| p[3] > 200).count();
-        let transparentes = v.chunks_exact(4).filter(|p| p[3] == 0).count();
+        assert!(v.as_chunks::<4>().0.iter().all(|p| p[..3] == [0, 0, 0]), "todo negro");
+        let opacos = v.as_chunks::<4>().0.iter().filter(|p| p[3] > 200).count();
+        let transparentes = v.as_chunks::<4>().0.iter().filter(|p| p[3] == 0).count();
         assert!(opacos > 30, "hay glifo ({opacos})");
         assert!(transparentes > opacos, "el fondo de color desaparece");
         assert_eq!(pixel(&v, n, n / 2, 2)[3], 0, "el borde del cuadrado de color ya no está");
