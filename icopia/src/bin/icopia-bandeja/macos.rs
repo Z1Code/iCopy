@@ -126,7 +126,6 @@ pub fn main() {
     .expect("menú");
 
     let mut tray: Option<TrayIcon> = None;
-    let mut estado = EstadoUi::sin_datos(Fase::Inactiva);
     let mut pausado = false;
     // Sin Apple ID se pide iniciar sesión ya; con uno, si la sesión caducó lo dice el motor.
     let mut login_abierto = cfg.apple_id.is_none();
@@ -165,11 +164,11 @@ pub fn main() {
                     Fase::Listando { .. } | Fase::Copiando { .. } => login_abierto = false,
                     _ => {}
                 }
-                estado = e;
+
                 if ultimo_tooltip.elapsed() >= Duration::from_secs(1) {
                     ultimo_tooltip = Instant::now();
                     if let Some(tr) = &tray {
-                        let _ = tr.set_tooltip(Some(format!("iCopy — {}", estado.texto())));
+                        let _ = tr.set_tooltip(Some(format!("iCopy — {}", e.texto())));
                     }
                 }
             }
