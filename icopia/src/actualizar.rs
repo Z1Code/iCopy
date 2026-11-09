@@ -26,9 +26,17 @@ pub fn url_api() -> String {
     std::env::var("ICOPIA_URL_ACTUALIZACIONES").unwrap_or_else(|_| URL_API.into())
 }
 
-/// Nombre del paquete de esta plataforma (macOS llegará en v0.4.0).
+/// Nombre del paquete de esta plataforma.
 pub fn nombre_paquete(v: &Version) -> String {
-    format!("iCopy-Setup-{v}.exe")
+    nombre_paquete_para(std::env::consts::OS, v)
+}
+
+/// Windows: el instalador; macOS: el zip de `iCopy.app` (solo Apple Silicon).
+pub fn nombre_paquete_para(so: &str, v: &Version) -> String {
+    match so {
+        "macos" => format!("iCopy-{v}-macos-arm64.zip"),
+        _ => format!("iCopy-Setup-{v}.exe"),
+    }
 }
 
 /// La publicación de `json` (respuesta de `releases/latest`) si es estable, más nueva que `actual`
@@ -171,16 +179,186 @@ pub fn momento_tranquilo(m: Momento) -> bool {
 /// Lanza el instalador en silencio (con su log junto al paquete) y devuelve su proceso. Quien llama
 /// NO debe cerrarse: el instalador cierra iCopy, reemplaza los archivos y la vuelve a abrir. Si el
 /// instalador termina con error, la app sigue viva y puede avisar.
+#[cfg(windows)]
 pub fn aplicar(paquete: &Path) -> Result<std::process::Child> {
-    if !cfg!(windows) {
-        bail!("actualizar aún no está disponible en este sistema");
-    }
     let log = paquete.with_file_name("instalacion.log");
     std::process::Command::new(paquete)
         .args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-"])
         .arg(format!("/LOG={}", log.display()))
         .spawn()
         .with_context(|| format!("no pude lanzar {}", paquete.display()))
+}
+
+/// Actualizar en macOS: no hay instalador; la app sustituye su propio bundle por el del zip (ya
+/// verificado con la firma v2), comprueba que está firmado por Apple con nuestro Team ID y se
+/// relanza al salir.
+pub mod macos {
+    use anyhow::{bail, Context, Result};
+    use std::path::{Path, PathBuf};
+
+    /// Equipo de Apple Developer de iCopy (el Team ID es público: va en cualquier app firmada).
+    pub const EQUIPO_APPLE: &str = "YYNWA2QYGF";
+    const VIEJA: &str = ".iCopy-vieja.app";
+
+    /// La carpeta `*.app` que contiene `exe` (p. ej. `/Applications/iCopy.app`), si la hay.
+    pub fn bundle_de(exe: &Path) -> Option<PathBuf> {
+        exe.ancestors().find(|p| p.extension().is_some_and(|e| e == "app")).map(Path::to_path_buf)
+    }
+
+    /// Firma de Apple válida y de nuestro equipo.
+    pub fn verificar_firma_apple(app: &Path) -> Result<()> {
+        let ok = std::process::Command::new("codesign").args(["--verify", "--deep", "--strict"]).arg(app).status()?;
+        if !ok.success() {
+            bail!("la firma de Apple de la versión nueva no es válida");
+        }
+        let info = std::process::Command::new("codesign").arg("-dv").arg(app).output()?;
+        let texto = String::from_utf8_lossy(&info.stderr);
+        if !texto.lines().any(|l| l.trim() == format!("TeamIdentifier={EQUIPO_APPLE}")) {
+            bail!("la versión nueva no está firmada por el equipo de iCopy");
+        }
+        Ok(())
+    }
+
+    /// Sustituye `actual` (un `iCopy.app`) por el que trae `zip`. La anterior queda en
+    /// `.iCopy-vieja.app` (se borra al arrancar la nueva); si algo falla, `actual` sigue intacto.
+    pub fn sustituir_bundle(actual: &Path, zip: &Path, verificar: &dyn Fn(&Path) -> Result<()>) -> Result<()> {
+        let padre = actual.parent().context("el bundle no tiene carpeta padre")?;
+        let tmp = padre.join(format!(".iCopy-nueva-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).with_context(|| format!("no se puede escribir en {}", padre.display()))?;
+        let r = (|| -> Result<()> {
+            let ok = std::process::Command::new("ditto").args(["-x", "-k"]).arg(zip).arg(&tmp).status()?;
+            if !ok.success() {
+                bail!("no se pudo descomprimir la versión nueva");
+            }
+            let nueva = tmp.join("iCopy.app");
+            if !nueva.is_dir() {
+                bail!("el paquete no contiene iCopy.app");
+            }
+            verificar(&nueva)?;
+            let vieja = padre.join(VIEJA);
+            let _ = std::fs::remove_dir_all(&vieja);
+            std::fs::rename(actual, &vieja).context("no se pudo apartar la versión actual")?;
+            if let Err(e) = std::fs::rename(&nueva, actual) {
+                let _ = std::fs::rename(&vieja, actual); // deshacer: la actual vuelve a su sitio
+                return Err(e).context("no se pudo colocar la versión nueva");
+            }
+            Ok(())
+        })();
+        let _ = std::fs::remove_dir_all(&tmp);
+        r
+    }
+
+    /// Al arrancar: borra la versión anterior que dejó una actualización.
+    pub fn limpiar_vieja(bundle: &Path) {
+        if let Some(padre) = bundle.parent() {
+            let _ = std::fs::remove_dir_all(padre.join(VIEJA));
+        }
+    }
+
+    /// Lanza un proceso que espera a que este termine y vuelve a abrir `bundle`.
+    pub fn relanzar_al_salir(bundle: &Path) -> Result<()> {
+        std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("while kill -0 \"$1\" 2>/dev/null; do sleep 0.5; done; open \"$2\"")
+            .arg("sh")
+            .arg(std::process::id().to_string())
+            .arg(bundle)
+            .spawn()
+            .context("no pude programar el reinicio")?;
+        Ok(())
+    }
+
+    /// Todo junto: sustituye el bundle en el que corre la app y programa el reinicio. Si va bien,
+    /// quien llama debe salir de la app enseguida.
+    pub fn aplicar(zip: &Path) -> Result<()> {
+        let bundle = bundle_de(&std::env::current_exe()?).context("iCopy no se está ejecutando desde iCopy.app")?;
+        sustituir_bundle(&bundle, zip, &verificar_firma_apple)?;
+        relanzar_al_salir(&bundle)
+    }
+
+    #[cfg(test)]
+    mod pruebas {
+        use super::*;
+
+        #[test]
+        fn bundle_de_un_ejecutable() {
+            let exe = Path::new("/Applications/iCopy.app/Contents/MacOS/icopia-bandeja");
+            assert_eq!(bundle_de(exe).as_deref(), Some(Path::new("/Applications/iCopy.app")));
+            assert_eq!(bundle_de(Path::new("/x/target/release/icopia-bandeja")), None);
+        }
+
+        #[cfg(target_os = "macos")]
+        fn bundle_falso(dir: &Path, version: &str) -> PathBuf {
+            let app = dir.join("iCopy.app");
+            std::fs::create_dir_all(app.join("Contents")).unwrap();
+            std::fs::write(app.join("Contents").join("version.txt"), version).unwrap();
+            app
+        }
+
+        #[cfg(target_os = "macos")]
+        fn zip_de(app: &Path, zip: &Path) {
+            let ok = std::process::Command::new("ditto").args(["-c", "-k", "--keepParent"]).arg(app).arg(zip).status().unwrap();
+            assert!(ok.success());
+        }
+
+        #[cfg(target_os = "macos")]
+        fn version(app: &Path) -> String {
+            std::fs::read_to_string(app.join("Contents").join("version.txt")).unwrap()
+        }
+
+        #[cfg(target_os = "macos")]
+        #[test]
+        fn sustituye_y_guarda_la_vieja() {
+            let d = tempfile::tempdir().unwrap();
+            let nueva_dir = d.path().join("nueva");
+            let zip = d.path().join("nueva.zip");
+            zip_de(&bundle_falso(&nueva_dir, "2"), &zip);
+            let instalada = d.path().join("apps");
+            let actual = bundle_falso(&instalada, "1");
+            sustituir_bundle(&actual, &zip, &|_| Ok(())).unwrap();
+            assert_eq!(version(&actual), "2");
+            assert_eq!(version(&instalada.join(VIEJA)), "1");
+            assert_eq!(std::fs::read_dir(&instalada).unwrap().count(), 2, "sin temporales sueltos");
+            limpiar_vieja(&actual);
+            assert!(!instalada.join(VIEJA).exists());
+        }
+
+        #[cfg(target_os = "macos")]
+        #[test]
+        fn verificacion_fallida_no_toca_nada() {
+            let d = tempfile::tempdir().unwrap();
+            let zip = d.path().join("nueva.zip");
+            zip_de(&bundle_falso(&d.path().join("nueva"), "2"), &zip);
+            let instalada = d.path().join("apps");
+            let actual = bundle_falso(&instalada, "1");
+            assert!(sustituir_bundle(&actual, &zip, &|_| bail!("firma mala")).is_err());
+            assert_eq!(version(&actual), "1");
+            assert_eq!(std::fs::read_dir(&instalada).unwrap().count(), 1);
+        }
+
+        #[cfg(target_os = "macos")]
+        #[test]
+        fn una_app_sin_firma_de_nuestro_equipo_se_rechaza() {
+            let d = tempfile::tempdir().unwrap();
+            let app = bundle_falso(d.path(), "1");
+            assert!(verificar_firma_apple(&app).is_err());
+        }
+
+        #[cfg(target_os = "macos")]
+        #[test]
+        fn zip_sin_icopy_app_se_rechaza() {
+            let d = tempfile::tempdir().unwrap();
+            let otro = d.path().join("Otra.app");
+            std::fs::create_dir_all(&otro).unwrap();
+            let zip = d.path().join("x.zip");
+            zip_de(&otro, &zip);
+            let instalada = d.path().join("apps");
+            let actual = bundle_falso(&instalada, "1");
+            assert!(sustituir_bundle(&actual, &zip, &|_| Ok(())).is_err());
+            assert_eq!(version(&actual), "1");
+        }
+    }
 }
 
 /// Las compilaciones de desarrollo (debug o ejecutadas desde `target\`) no se actualizan solas,
@@ -204,11 +382,28 @@ mod pruebas {
         Version::parse(s).unwrap()
     }
 
+    /// Las pruebas escriben los nombres de Windows (`iCopy-Setup-X.exe[.sig…]`); aquí se cambian por
+    /// los del sistema en el que corren, para que valgan también en macOS.
+    fn de_este_sistema(n: &str) -> String {
+        let Some(resto) = n.strip_prefix("iCopy-Setup-") else { return n.to_string() };
+        let Some(fin) = resto.find(".exe") else { return n.to_string() };
+        format!("{}{}", nombre_paquete(&v(&resto[..fin])), &resto[fin + 4..])
+    }
+
     fn release(tag: &str, assets: &[&str]) -> Value {
         json!({
             "tag_name": tag, "draft": false, "prerelease": false,
-            "assets": assets.iter().map(|n| json!({"name": n, "browser_download_url": format!("https://x/{n}")})).collect::<Vec<_>>()
+            "assets": assets.iter().map(|n| {
+                let n = de_este_sistema(n);
+                json!({"name": n, "browser_download_url": format!("https://x/{n}")})
+            }).collect::<Vec<_>>()
         })
+    }
+
+    #[test]
+    fn nombres_de_paquete_por_sistema() {
+        assert_eq!(nombre_paquete_para("windows", &v("0.3.0")), "iCopy-Setup-0.3.0.exe");
+        assert_eq!(nombre_paquete_para("macos", &v("0.3.0")), "iCopy-0.3.0-macos-arm64.zip");
     }
 
     #[test]
@@ -216,8 +411,8 @@ mod pruebas {
         let r = release("v0.3.0", &["iCopy-Setup-0.3.0.exe", "iCopy-Setup-0.3.0.exe.sig2"]);
         let p = elegir(&r, &v("0.2.0")).unwrap();
         assert_eq!(p.version, v("0.3.0"));
-        assert_eq!(p.url_paquete, "https://x/iCopy-Setup-0.3.0.exe");
-        assert_eq!(p.url_firma, "https://x/iCopy-Setup-0.3.0.exe.sig2");
+        assert_eq!(p.url_paquete, format!("https://x/{}", nombre_paquete(&v("0.3.0"))));
+        assert_eq!(p.url_firma, format!("https://x/{}.sig2", nombre_paquete(&v("0.3.0"))));
         assert!(elegir(&r, &v("0.3.0")).is_none(), "misma versión");
         assert!(elegir(&r, &v("0.4.0")).is_none(), "nunca baja de versión");
     }

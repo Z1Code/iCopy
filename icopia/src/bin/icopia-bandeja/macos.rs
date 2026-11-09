@@ -1,14 +1,16 @@
 //! iCopy en la barra de menús de macOS. El estado de la copia se ve en el propio menú (sin el panel
-//! flotante de Windows). «Liberar espacio en iCloud» y las actualizaciones llegan en próximas tareas.
+//! flotante de Windows). «Liberar espacio en iCloud» llega en la próxima versión.
+use icopia::actualizar::{self, momento_tranquilo, Momento};
 use icopia::bandeja::estado::{EstadoUi, EventoUi, Fase};
+use icopia::bandeja::hilo_actualizar::{self, EventoActualizacion};
 use icopia::bandeja::hilo_motor::{self, Orden};
 use icopia::bandeja::{autoarranque, avisos, icono};
 use icopia::config::{self, Config};
 use icopia::fuente::FuenteIcloud;
-use icopia::i18n::{t, T};
+use icopia::i18n::{t, tf, T};
 use icopia::liberar::ControlBorrado;
 use icopia::puente::Puente;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 use tao::event::{Event, StartCause};
@@ -21,6 +23,23 @@ enum Ev {
     Ui(EventoUi),
     /// La ventana de inicio de sesión se cerró (con éxito o no).
     LoginCerrado,
+    Actualizacion(EventoActualizacion),
+}
+
+/// Ventanas de inicio de sesión abiertas: una actualización automática no debe cerrárselas a nadie.
+static LOGIN_ABIERTOS: AtomicUsize = AtomicUsize::new(0);
+
+/// ¿Hay un «liberar espacio» vivo (p. ej. `icopia liberar` en una Terminal)? Se lee del registro.
+fn liberando_ahora() -> bool {
+    let Some(ruta) = Config::cargar().ok().and_then(|c| c.destino).map(|d| d.join(".icopia").join("registro.db")) else {
+        return false;
+    };
+    let progreso = ruta
+        .exists()
+        .then(|| icopia::registro::Registro::abrir_lectura(&ruta).ok())
+        .flatten()
+        .and_then(|r| icopia::progreso_liberar::leer(&r));
+    hilo_actualizar::liberando(progreso.as_ref(), chrono::Utc::now().timestamp())
 }
 
 /// Icono plantilla (negro sobre transparente) a 2x del tamaño de la barra de menús (22 pt).
@@ -37,8 +56,10 @@ fn lanzar_login(tx: &mpsc::Sender<Orden>, cancelar: &AtomicBool, ya_pausado: boo
         cancelar.store(true, Ordering::SeqCst);
     }
     let tx = tx.clone();
+    LOGIN_ABIERTOS.fetch_add(1, Ordering::SeqCst);
     std::thread::spawn(move || {
         let _ = std::process::Command::new(icopia::plataforma::exe_junto("icopia-login")).status();
+        LOGIN_ABIERTOS.fetch_sub(1, Ordering::SeqCst);
         if !ya_pausado {
             let _ = tx.send(Orden::Reanudar);
         }
@@ -104,6 +125,17 @@ pub fn main() {
     let i_destino = MenuItem::new(t(T::MenuDestino), true, None);
     let i_login = MenuItem::new(t(T::MenuSesion), true, None);
     let i_auto = CheckMenuItem::new(t(T::MenuAutoMac), true, autoarranque::activo(), None);
+    // Actualizaciones: solo desde iCopy.app y en release (o con ICOPIA_URL_ACTUALIZACIONES).
+    let (tx_buscar, rx_buscar) = mpsc::channel::<()>();
+    let permitidas = actualizar::permitidas();
+    if permitidas {
+        let proxy_act = Mutex::new(event_loop.create_proxy());
+        hilo_actualizar::lanzar(rx_buscar, config::dir_app().join("actualizaciones"), move |e| {
+            let _ = proxy_act.lock().unwrap().send_event(Ev::Actualizacion(e));
+        });
+    }
+    let i_act_auto = CheckMenuItem::new(t(T::MenuActAuto), permitidas, cfg.actualizar_auto, None);
+    let i_buscar = MenuItem::new(t(T::MenuBuscarAct), permitidas, None);
     let i_salir = MenuItem::new(t(T::MenuSalir), true, None);
     let menu = Menu::new();
     menu.append_items(&[
@@ -120,6 +152,8 @@ pub fn main() {
         &i_destino,
         &i_login,
         &i_auto,
+        &i_act_auto,
+        &i_buscar,
         &PredefinedMenuItem::separator(),
         &i_salir,
     ])
@@ -133,6 +167,17 @@ pub fn main() {
         lanzar_login(&tx, &cancelar, false, proxy_login.clone());
     }
     let mut ultimo_tooltip = Instant::now();
+    // Actualización lista (versión, zip ya verificado), última versión avisada y control de reintentos.
+    let mut pendiente: Option<(String, std::path::PathBuf)> = None;
+    let mut avisada: Option<String> = None;
+    let mut instalar_ahora = false;
+    let mut fallo_al_instalar = false;
+    let mut ultimo_chequeo_act = Instant::now();
+    let mut copiando = false;
+    // La versión anterior que dejó una actualización ya no hace falta.
+    if let Some(b) = std::env::current_exe().ok().and_then(|e| actualizar::macos::bundle_de(&e)) {
+        actualizar::macos::limpiar_vieja(&b);
+    }
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(200));
@@ -164,6 +209,7 @@ pub fn main() {
                     Fase::Listando { .. } | Fase::Copiando { .. } => login_abierto = false,
                     _ => {}
                 }
+                copiando = matches!(e.fase, Fase::Listando { .. } | Fase::Copiando { .. } | Fase::Verificando { .. });
 
                 if ultimo_tooltip.elapsed() >= Duration::from_secs(1) {
                     ultimo_tooltip = Instant::now();
@@ -176,6 +222,21 @@ pub fn main() {
             Event::UserEvent(Ev::LoginCerrado) => {
                 // Si la sesión sigue caducada, la próxima ronda lo dirá; no se reabre en bucle.
             }
+            Event::UserEvent(Ev::Actualizacion(ev)) => match ev {
+                EventoActualizacion::Lista { version, paquete } => {
+                    i_buscar.set_text(tf(T::MenuActualizarA, &[("v", &version)]));
+                    pendiente = Some((version.clone(), paquete));
+                    fallo_al_instalar = false;
+                    if avisada.as_deref() != Some(version.as_str()) {
+                        let auto = Config::cargar().map(|c| c.actualizar_auto).unwrap_or(true);
+                        let texto = tf(if auto { T::AvActLista } else { T::AvActListaManual }, &[("v", &version)]);
+                        avisos::mostrar(t(T::AvActTitulo), &texto);
+                        avisada = Some(version);
+                    }
+                }
+                EventoActualizacion::AlDia => avisos::mostrar(t(T::AvActTitulo), &tf(T::AvActAlDia, &[("v", &actualizar::VERSION)])),
+                EventoActualizacion::Error(e) => avisos::mostrar(t(T::AvActTitulo), &tf(T::AvActError, &[("e", &e)])),
+            },
             _ => {}
         }
         while let Ok(ev) = MenuEvent::receiver().try_recv() {
@@ -212,11 +273,59 @@ pub fn main() {
                 lanzar_login(&tx, &cancelar, pausado, proxy_login.clone());
             } else if id == *i_auto.id() {
                 let _ = autoarranque::fijar(i_auto.is_checked());
+            } else if id == *i_act_auto.id() {
+                let mut c = Config::cargar().unwrap_or_default();
+                c.actualizar_auto = i_act_auto.is_checked();
+                let _ = c.guardar();
+            } else if id == *i_buscar.id() {
+                if pendiente.is_some() {
+                    if liberando_ahora() {
+                        avisos::mostrar(t(T::AvActTitulo), t(T::AvActLiberando));
+                    } else {
+                        instalar_ahora = true;
+                    }
+                } else {
+                    let _ = tx_buscar.send(());
+                }
             } else if id == *i_salir.id() {
                 cancelar.store(true, Ordering::SeqCst);
                 let _ = tx.send(Orden::Salir);
                 tray.take();
                 *control_flow = ControlFlow::Exit;
+            }
+        }
+        // Instalación automática: solo con todo tranquilo (sin copia, pausa, borrado ni login abierto).
+        if pendiente.is_some() && !instalar_ahora && !fallo_al_instalar && ultimo_chequeo_act.elapsed() >= Duration::from_secs(5) {
+            ultimo_chequeo_act = Instant::now();
+            if Config::cargar().map(|c| c.actualizar_auto).unwrap_or(true) {
+                let momento = Momento {
+                    copiando,
+                    pausado,
+                    liberando: liberando_ahora(),
+                    ventana_abierta: LOGIN_ABIERTOS.load(Ordering::SeqCst) > 0,
+                };
+                instalar_ahora = momento_tranquilo(momento);
+            }
+        }
+        if std::mem::take(&mut instalar_ahora) {
+            if let Some((v, zip)) = pendiente.clone() {
+                // Se para el motor antes de cambiar los archivos de la app.
+                cancelar.store(true, Ordering::SeqCst);
+                let _ = tx.send(Orden::Pausar);
+                match actualizar::macos::aplicar(&zip) {
+                    Ok(()) => {
+                        let _ = tx.send(Orden::Salir);
+                        tray.take();
+                        *control_flow = ControlFlow::Exit;
+                    }
+                    Err(e) => {
+                        if !pausado {
+                            let _ = tx.send(Orden::Reanudar);
+                        }
+                        fallo_al_instalar = true;
+                        avisos::mostrar(t(T::AvActTitulo), &format!("{} ({e:#})", tf(T::AvActFalloInstalar, &[("v", &v)])));
+                    }
+                }
             }
         }
     });

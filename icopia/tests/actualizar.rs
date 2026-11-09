@@ -105,11 +105,13 @@ fn paquete_que_falla_no_deja_nada() {
 
 #[test]
 fn consultar_lee_la_api() {
+    // El paquete de este sistema (instalador en Windows, zip en macOS).
+    let paquete = icopia::actualizar::nombre_paquete(&Version::parse("9.9.9").unwrap());
     let json = serde_json::json!({
         "tag_name": "v9.9.9", "draft": false, "prerelease": false,
         "assets": [
-            {"name": "iCopy-Setup-9.9.9.exe", "browser_download_url": "http://x/p.exe"},
-            {"name": "iCopy-Setup-9.9.9.exe.sig2", "browser_download_url": "http://x/p.exe.sig2"}
+            {"name": paquete, "browser_download_url": "http://x/p.exe"},
+            {"name": format!("{paquete}.sig2"), "browser_download_url": "http://x/p.exe.sig2"}
         ]
     });
     let srv = servidor(vec![("/latest", Comportamiento::Servir(json.to_string().into_bytes()))]);
