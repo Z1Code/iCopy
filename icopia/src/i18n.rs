@@ -33,9 +33,22 @@ thread_local! {
     static FORZADO: Cell<Option<Idioma>> = const { Cell::new(None) };
 }
 
+#[cfg(windows)]
 #[link(name = "kernel32")]
 extern "system" {
     fn GetUserDefaultUILanguage() -> u16;
+}
+
+/// Idioma de la interfaz del sistema.
+#[cfg(windows)]
+fn idioma_del_sistema() -> Idioma {
+    Idioma::desde_langid(unsafe { GetUserDefaultUILanguage() })
+}
+
+/// macOS y otros: el primer idioma preferido (p. ej. "es-ES"); si no se sabe, inglés.
+#[cfg(not(windows))]
+fn idioma_del_sistema() -> Idioma {
+    sys_locale::get_locale().and_then(|l| Idioma::desde_codigo(&l)).unwrap_or(Idioma::En)
 }
 
 fn detectar() -> Idioma {
@@ -46,7 +59,7 @@ fn detectar() -> Idioma {
     if cfg!(test) {
         return Idioma::Es;
     }
-    Idioma::desde_langid(unsafe { GetUserDefaultUILanguage() })
+    idioma_del_sistema()
 }
 
 pub fn idioma() -> Idioma {

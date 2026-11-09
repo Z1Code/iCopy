@@ -21,3 +21,4 @@ pub mod planificador;
 pub mod bandeja;
 pub mod login;
 pub mod actualizar;
+pub mod plataforma;

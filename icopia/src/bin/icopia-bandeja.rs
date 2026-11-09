@@ -98,17 +98,6 @@ fn texto_tooltip(estado: &EstadoUi, liberar: Option<&ProgresoLiberar>) -> String
     }
 }
 
-fn instancia_unica() -> bool {
-    use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
-    use windows_sys::Win32::System::Threading::CreateMutexW;
-    // Con ICOPIA_DIR (pruebas, otra configuración) se permite una instancia por carpeta.
-    let sufijo = std::env::var("ICOPIA_DIR").map(|d| format!("-{:x}", d.bytes().fold(0u64, |h, b| h.wrapping_mul(131).wrapping_add(b as u64)))).unwrap_or_default();
-    let nombre: Vec<u16> = format!("Local\\icopia-bandeja{sufijo}\0").encode_utf16().collect();
-    unsafe {
-        let h = CreateMutexW(std::ptr::null(), 0, nombre.as_ptr());
-        !h.is_null() && GetLastError() != ERROR_ALREADY_EXISTS
-    }
-}
 
 fn icono_de(color: icopia::bandeja::estado::Color) -> Icon {
     use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSMICON};
@@ -136,19 +125,15 @@ fn lanzar_pausando(mut cmd: std::process::Command, tx: &mpsc::Sender<Orden>, can
     });
 }
 
-fn exe_junto(nombre: &str) -> std::path::PathBuf {
-    std::env::current_exe().expect("ruta del exe").with_file_name(nombre)
-}
-
 /// Abre la ventana de inicio de sesión (`icopia-login.exe`), pausando la copia mientras tanto.
 fn lanzar_login(tx: &mpsc::Sender<Orden>, cancelar: &AtomicBool, ya_pausado: bool) {
-    lanzar_pausando(std::process::Command::new(exe_junto("icopia-login.exe")), tx, cancelar, ya_pausado);
+    lanzar_pausando(std::process::Command::new(icopia::plataforma::exe_junto("icopia-login")), tx, cancelar, ya_pausado);
 }
 
 fn main() {
-    if !instancia_unica() {
+    let Some(_instancia) = icopia::plataforma::instancia_unica("bandeja") else {
         return;
-    }
+    };
     let mut cfg = Config::cargar().unwrap_or_default();
     if cfg.destino.is_none() {
         if let Some(p) = rfd::FileDialog::new().set_title(t(T::DlgDestino)).pick_folder() {
@@ -302,7 +287,7 @@ fn main() {
         AccionAsistente::Pausar(si) => control_as.pausa.store(si, Ordering::SeqCst),
         AccionAsistente::CancelarBorrado => control_as.cancelar.store(true, Ordering::SeqCst),
         AccionAsistente::AbrirArchivo(ruta) => {
-            let _ = std::process::Command::new("explorer").arg(ruta).spawn();
+            icopia::plataforma::abrir(&ruta);
         }
         AccionAsistente::AbrirCarpeta => abrir_carpeta_as(),
         AccionAsistente::Restaurar(sesion) => {
@@ -340,7 +325,7 @@ fn main() {
     };
     fn abrir_carpeta_fn() {
         if let Some(d) = Config::cargar().ok().and_then(|c| c.destino) {
-            let _ = std::process::Command::new("explorer").arg(d).spawn();
+            icopia::plataforma::abrir(&d);
         }
     }
     let abrir_carpeta = abrir_carpeta_fn;

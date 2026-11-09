@@ -25,8 +25,8 @@ pub fn comando_puente() -> anyhow::Result<Command> {
         return Ok(Command::new(ruta));
     }
     let exe = std::env::current_exe()?;
-    let junto = exe.with_file_name("puente-icloud.exe");
-    anyhow::ensure!(junto.exists(), "No encuentro puente-icloud.exe junto a {}", exe.display());
+    let junto = exe.with_file_name(crate::plataforma::nombre_exe("puente-icloud"));
+    anyhow::ensure!(junto.exists(), "No encuentro {} junto a {}", junto.display(), exe.display());
     Ok(Command::new(junto))
 }
 
