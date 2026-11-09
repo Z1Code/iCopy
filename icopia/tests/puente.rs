@@ -4,7 +4,8 @@ use std::process::Command;
 
 fn falso(args: &[&str]) -> Puente {
     let script = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/datos/puente_falso.py");
-    let mut cmd = Command::new("python");
+    let python = std::env::var("ICOPIA_PYTHON").unwrap_or_else(|_| if cfg!(windows) { "python" } else { "python3" }.into());
+    let mut cmd = Command::new(python);
     cmd.arg(script);
     for a in args {
         cmd.arg(a);

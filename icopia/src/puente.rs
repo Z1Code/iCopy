@@ -17,7 +17,8 @@ pub struct Puente {
 pub fn comando_puente() -> anyhow::Result<Command> {
     if let Ok(ruta) = std::env::var("ICOPIA_PUENTE") {
         if ruta.to_lowercase().ends_with(".py") {
-            let python = std::env::var("ICOPIA_PYTHON").unwrap_or_else(|_| "python".into());
+            // En macOS no existe `python`, solo `python3`.
+            let python = std::env::var("ICOPIA_PYTHON").unwrap_or_else(|_| if cfg!(windows) { "python" } else { "python3" }.into());
             let mut c = Command::new(python);
             c.arg("-I").arg(ruta);
             return Ok(c);
