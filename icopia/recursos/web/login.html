@@ -254,6 +254,9 @@
   $("icono").hidden = !$("icono").src;
   document.addEventListener("contextmenu", (e) => e.preventDefault());
 
+  // Con Rust: avisar de que la página está lista para recibir el primer estado.
+  if (ipc) enviar({ accion: "lista" });
+
   // Demostración en un navegador (sin Rust): login.html?paso=codigo&tema=oscuro&ocupado=1&error=1
   if (!ipc) {
     const q = new URLSearchParams(location.search);
