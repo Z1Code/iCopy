@@ -13,11 +13,11 @@ path = "src/main.rs"
 
 [[bin]]
 name = "icopia-bandeja"
-path = "src/bin/icopia-bandeja.rs"
+path = "src/bin/icopia-bandeja/main.rs"
 
 [[bin]]
 name = "icopia-login"
-path = "src/bin/icopia-login.rs"
+path = "src/bin/icopia-login/main.rs"
 
 [dependencies]
 anyhow = "1"

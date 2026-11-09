@@ -2,12 +2,16 @@
 //! imagen de redes sociales del README. Uso:
 //! `cargo run --example panel_social -- salida.png [escala] [oscuro|claro] [copiando|borrando|liberado]`
 //! (`borrando` y `liberado` añaden la sección de liberar espacio en iCloud).
+
+// Dibuja con GDI: solo existe en Windows.
+#[cfg(windows)]
+mod demo {
 use icopia::bandeja::estado::{Detalle, EstadoUi, Fase, Ronda};
 use icopia::bandeja::panel::{vista, vista_liberar, Medidas};
 use icopia::bandeja::panel_gdi::{self, Lienzo};
 use icopia::progreso_liberar::{FaseLiberar, ProgresoLiberar};
 
-fn main() {
+pub fn main() {
     let mut args = std::env::args().skip(1);
     let salida = args.next().expect("ruta del PNG");
     let escala: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(2.0);
@@ -76,4 +80,13 @@ fn main() {
     enc.set_color(png::ColorType::Rgba);
     enc.set_depth(png::BitDepth::Eight);
     enc.write_header().unwrap().write_image_data(&rgba).unwrap();
+}
+
+}
+
+fn main() {
+    #[cfg(windows)]
+    demo::main();
+    #[cfg(not(windows))]
+    eprintln!("Este ejemplo dibuja con GDI: solo funciona en Windows.");
 }

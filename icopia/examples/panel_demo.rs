@@ -1,10 +1,14 @@
 //! Renderiza el panel de progreso de la bandeja en varios estados (claro y oscuro) a un PNG,
 //! para revisarlo sin abrir la bandeja. Uso: `cargo run --example panel_demo -- salida.png [escala]`
+
+// Dibuja con GDI: solo existe en Windows.
+#[cfg(windows)]
+mod demo {
 use icopia::bandeja::estado::{Detalle, EstadoUi, Fase, Ronda};
 use icopia::bandeja::panel::{vista, Medidas};
 use icopia::bandeja::panel_gdi::{self, Boton, Lienzo};
 
-fn main() {
+pub fn main() {
     let mut args = std::env::args().skip(1);
     let salida = args.next().expect("ruta del PNG");
     let escala: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(1.5);
@@ -49,4 +53,13 @@ fn main() {
     enc.set_color(png::ColorType::Rgba);
     enc.set_depth(png::BitDepth::Eight);
     enc.write_header().unwrap().write_image_data(&lamina).unwrap();
+}
+
+}
+
+fn main() {
+    #[cfg(windows)]
+    demo::main();
+    #[cfg(not(windows))]
+    eprintln!("Este ejemplo dibuja con GDI: solo funciona en Windows.");
 }

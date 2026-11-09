@@ -1,4 +1,3 @@
-#![windows_subsystem = "windows"]
 use anyhow::Context;
 use icopia::bandeja::asistente::{Accion as AccionAsistente, Asistente, Paso, Revision};
 use icopia::bandeja::asistente_ventana::VentanaAsistente;
@@ -130,7 +129,7 @@ fn lanzar_login(tx: &mpsc::Sender<Orden>, cancelar: &AtomicBool, ya_pausado: boo
     lanzar_pausando(std::process::Command::new(icopia::plataforma::exe_junto("icopia-login")), tx, cancelar, ya_pausado);
 }
 
-fn main() {
+pub fn main() {
     let Some(_instancia) = icopia::plataforma::instancia_unica("bandeja") else {
         return;
     };

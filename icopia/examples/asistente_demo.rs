@@ -2,6 +2,10 @@
 //! PNG, para revisarlo sin la bandeja. Uso:
 //! `cargo run --example asistente_demo -- salida.png [escala] [oscuro|claro] [paso] [es|en]`
 //! con paso = elegir | anios | revisando | revisado | confirmar | manteniendo | enmarcha | esperando | resultado.
+
+// Dibuja con GDI: solo existe en Windows.
+#[cfg(windows)]
+mod demo {
 use icopia::bandeja::asistente::{Accion, Asistente, Control, EventoLiberar, Paso, ResumenFinal, ResumenPlan};
 use icopia::bandeja::asistente_gdi;
 use icopia::bandeja::panel_gdi::Lienzo;
@@ -40,7 +44,7 @@ fn inventario(ahora: i64) -> Vec<FilaInventario> {
     v
 }
 
-fn main() {
+pub fn main() {
     let mut args = std::env::args().skip(1);
     let salida = args.next().expect("ruta del PNG");
     let escala: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(1.5);
@@ -148,4 +152,13 @@ fn main() {
         enc.set_depth(png::BitDepth::Eight);
         enc.write_header().unwrap().write_image_data(&rgba).unwrap();
     });
+}
+
+}
+
+fn main() {
+    #[cfg(windows)]
+    demo::main();
+    #[cfg(not(windows))]
+    eprintln!("Este ejemplo dibuja con GDI: solo funciona en Windows.");
 }

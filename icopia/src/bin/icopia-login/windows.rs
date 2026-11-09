@@ -1,4 +1,3 @@
-#![windows_subsystem = "windows"]
 //! Ventana pequeña para iniciar sesión en iCloud (lo mismo que `icopia login`, sin consola).
 //! Sale con código 0 si la sesión quedó iniciada; 1 si se cierra o cancela.
 use icopia::config::{self, Config};
@@ -483,7 +482,7 @@ fn instancia_unica() -> bool {
     }
 }
 
-fn main() {
+pub fn main() {
     if !instancia_unica() {
         std::process::exit(1);
     }
