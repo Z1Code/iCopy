@@ -286,6 +286,7 @@ textos! {
     MenuDestino => "Cambiar destino…", "Change destination…";
     MenuSesion => "Iniciar sesión en iCloud…", "Sign in to iCloud…";
     MenuAuto => "Iniciar con Windows", "Start with Windows";
+    MenuAutoMac => "Abrir al iniciar sesión", "Open at login";
     MenuBuscarAct => "Buscar actualizaciones", "Check for updates";
     MenuActualizarA => "Reiniciar y actualizar a {v}", "Restart and update to {v}";
     MenuActAuto => "Actualizar automáticamente", "Update automatically";

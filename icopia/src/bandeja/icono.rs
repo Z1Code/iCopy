@@ -27,6 +27,20 @@ pub fn rgba(color: Color, n: u32) -> (Vec<u8>, u32, u32) {
     (pintar(n, paleta(color)), n, n)
 }
 
+/// Icono «plantilla» de la barra de menús de macOS: solo el glifo (flecha y bandeja) en negro sobre
+/// transparente; el sistema lo tiñe según el tema. Sale del glifo blanco del icono normal.
+pub fn plantilla(n: u32) -> Vec<u8> {
+    let (rgba, _, _) = rgba(Color::Azul, n);
+    rgba.chunks_exact(4)
+        .flat_map(|p| {
+            // Lo blanco (glifo) tiene sus tres canales altos; el fondo de color, no.
+            let blanco = p[0].min(p[1]).min(p[2]) as f32 / 255.0;
+            let fuerza = ((blanco - 0.55) / 0.45).clamp(0.0, 1.0);
+            [0, 0, 0, (p[3] as f32 * fuerza).round() as u8]
+        })
+        .collect()
+}
+
 /// Rectángulo con esquinas redondeadas (coordenadas en la rejilla de 32 unidades).
 struct Caja {
     x0: f32,
@@ -168,6 +182,19 @@ mod tests {
     fn pixel(v: &[u8], n: u32, x: u32, y: u32) -> [u8; 4] {
         let i = ((y * n + x) * 4) as usize;
         [v[i], v[i + 1], v[i + 2], v[i + 3]]
+    }
+
+    #[test]
+    fn plantilla_solo_glifo_negro() {
+        let n = 44;
+        let v = plantilla(n);
+        assert_eq!(v.len(), (n * n * 4) as usize);
+        assert!(v.chunks_exact(4).all(|p| p[..3] == [0, 0, 0]), "todo negro");
+        let opacos = v.chunks_exact(4).filter(|p| p[3] > 200).count();
+        let transparentes = v.chunks_exact(4).filter(|p| p[3] == 0).count();
+        assert!(opacos > 30, "hay glifo ({opacos})");
+        assert!(transparentes > opacos, "el fondo de color desaparece");
+        assert_eq!(pixel(&v, n, n / 2, 2)[3], 0, "el borde del cuadrado de color ya no está");
     }
 
     #[test]
