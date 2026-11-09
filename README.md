@@ -6,9 +6,10 @@
 
 [![CI](https://github.com/Z1Code/iCopy/actions/workflows/ci.yml/badge.svg)](https://github.com/Z1Code/iCopy/actions/workflows/ci.yml) [![Última versión](https://img.shields.io/github/v/release/Z1Code/iCopy)](https://github.com/Z1Code/iCopy/releases/latest)
 
-**Copia de seguridad de iCloud Fotos para Windows: completa, verificada y sin cortes.**
+**Copia de seguridad de iCloud Fotos para Windows y Mac: completa, verificada y sin cortes.**
 
-iCopy (internamente `icopia`) es una app de la bandeja de Windows que baja **todos los originales**
+iCopy (internamente `icopia`) es una app de la bandeja de Windows y de la barra de menús de macOS
+(beta) que baja **todos los originales**
 de tu fototeca de iCloud a una carpeta de tu PC o disco externo, comprueba cada archivo antes de darlo
 por bueno y retoma sola donde se quedó después de cualquier corte. Cuando todo está a salvo, y solo si
 tú lo confirmas, puede liberar espacio en iCloud.
@@ -117,6 +118,25 @@ se vuelve a abrir. Nunca actualiza mientras se borra en iCloud. En el menú del 
 desactivar *Actualizar automáticamente* (te avisa y tú eliges cuándo: *Reiniciar y actualizar*) o
 pulsar *Buscar actualizaciones*. Los cambios de cada versión están en el [CHANGELOG](CHANGELOG.md).
 
+### En Mac (beta)
+
+Requisitos: macOS 13 o posterior en un **Mac con Apple Silicon** (M1 o posterior).
+
+1. Descarga **`iCopy-X.Y.Z-macos-arm64.dmg`** de [Releases](https://github.com/Z1Code/iCopy/releases/latest),
+   ábrelo y arrastra **iCopy** a **Aplicaciones**. La app está firmada y notarizada por Apple: se abre sin
+   avisos de «desarrollador no identificado».
+2. Ábrela: aparece un icono en la **barra de menús** (arriba a la derecha), no en el Dock. Al primer
+   arranque elige la carpeta destino e inicia sesión en iCloud.
+3. La primera vez que copie a un disco externo, a Documentos o al Escritorio, macOS te pedirá permiso
+   para que iCopy acceda a esa carpeta: acéptalo.
+
+En el menú del icono ves el estado de la copia y tienes Copiar ahora, Pausar, Verificar todo, Abrir
+carpeta, Cambiar destino, Iniciar sesión, **Abrir al iniciar sesión** y las actualizaciones (se
+instalan solas igual que en Windows, comprobando la firma de iCopy y la de Apple). «Liberar espacio en
+iCloud» llega a Mac en la próxima versión.
+
+La configuración y la sesión se guardan en `~/Library/Application Support/icopia/`.
+
 ### Desde el código
 
 Requisitos: [Rust](https://rustup.rs) (toolchain MSVC), Python 3.11 y Git.
@@ -224,7 +244,7 @@ Para agentes de IA: ver [AGENTS.md](AGENTS.md).
 
 ## English summary
 
-**iCopy** is a Windows tray app that backs up **all original photos and videos** from iCloud Photos to a
+**iCopy** is a Windows tray app (and, in beta, a macOS menu bar app for Apple Silicon) that backs up **all original photos and videos** from iCloud Photos to a
 local folder (`YYYY\YYYY-MM\`). It exists because, with "Optimize iPhone Storage" on, USB copies on
 Windows hang or come out incomplete. iCopy talks to iCloud directly, verifies every file (exact size,
 container structure, SHA-256; atypical originals are confirmed by downloading twice), resumes after any
@@ -232,4 +252,4 @@ interruption, and renews iCloud's ~15-minute download links in batches. A hover/
 progress, speed and ETA. Optionally it frees iCloud space, deleting **only** re-verified items after you
 type `BORRAR`, keeping the last 30 days and never touching the Shared Library (deleted items stay 30 days
 in "Recently Deleted"). Built with Rust plus a small Python bridge using icloudpd's `pyicloud_ipd`.
-UI is in Spanish and English. Installs per user with a signed-update installer (`iCopy-Setup-X.Y.Z.exe` from Releases) and updates itself, verifying each release signature. Not affiliated with Apple. MIT licensed.
+UI is in Spanish and English. Windows: per-user installer (`iCopy-Setup-X.Y.Z.exe`); Mac: signed and notarized `.dmg`. Both update themselves, verifying each release signature (and, on Mac, Apple's signature and Team ID). Not affiliated with Apple. MIT licensed.

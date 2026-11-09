@@ -14,8 +14,11 @@ Diseño completo: `docs/superpowers/specs/2026-11-07-icopia-design.md`. Visión 
 ```
 icopia/                 crate Rust (lib + 3 binarios)
   src/main.rs           CLI `icopia` (destino, login, diagnostico, copiar, estado, verificar, liberar, restaurar)
-  src/bin/icopia-bandeja.rs  app de bandeja (menú, panel, avisos)
-  src/bin/icopia-login.rs    ventana de inicio de sesión (Apple ID, contraseña, 2FA)
+  src/bin/icopia-bandeja/    app: main.rs elige windows.rs (bandeja: menú, panel, avisos) o macos.rs
+                             (barra de menús: estado en el menú, sin panel ni «liberar» todavía)
+  src/bin/icopia-login/      inicio de sesión: windows.rs (controles nativos) o macos.rs (webview con
+                             recursos/web/login.html; los textos los pone Rust desde i18n.rs)
+  src/plataforma.rs          nombres de ejecutables, abrir carpetas, instancia única (por sistema)
   src/motor.rs          rondas: listar, descargar, verificar, renovar enlaces caducados
   src/descarga.rs       HTTP (reqwest), .part, reanudación por Range
   src/verificar.rs      tamaño + estructura de contenedor + SHA-256
@@ -36,6 +39,10 @@ puente/                 puente Python sobre pyicloud_ipd (icloudpd, versión fij
 docs/social/            imágenes del README y su generador (generar.py)
 instalar.ps1            compila e instala en %LOCALAPPDATA%\Programs\icopia (desarrollo)
 empaquetar.ps1          genera dist\iCopy-Setup-X.Y.Z.exe con instalador\icopy.iss (Inno Setup 6)
+empaquetar-mac.sh       genera dist/iCopy.app, iCopy-X.Y.Z-macos-arm64.zip (actualizador) y .dmg;
+                        --firmar (Developer ID desde un .p12) y --notarizar (API de App Store Connect)
+puente/build-mac.sh     puente con PyInstaller, firmado con hardened runtime y prueba de humo
+instalador/macos/       Info.plist (plantilla) y permisos (entitlements) del puente
 instalador/             script de Inno Setup (por usuario, sin administrador)
 .github/workflows/      ci.yml (clippy + pruebas en cada push) y publicar.yml (etiqueta vX.Y.Z → release firmada)
 CHANGELOG.md            cambios por versión (Keep a Changelog, SemVer)
@@ -112,6 +119,28 @@ de aceptar actualizaciones. Las compilaciones desde `target\` no se actualizan s
 La CI usa el Rust *stable* actual, que puede ser más nuevo que el local: si falla `clippy` por un lint
 nuevo, corrígelo (también con `cargo +<versión> clippy`). Las pruebas de integración ven el idioma real del
 sistema: no compares textos de la interfaz en un solo idioma.
+
+## macOS
+
+- Se programa en Windows y se compila y prueba en el Mac mini por SSH (`~/Projects/iCopy`, rama de
+  trabajo con `git pull`). En los comandos SSH: `export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:$PATH"`.
+  El clippy del Mac (Rust estable reciente) es más estricto: prueba también `cargo +1.98.0 clippy` en Windows.
+- Las rutas relativas se guardan en el registro **siempre con `\`**; para tocar el disco usa
+  `layout::en_disco(destino, rel)`. Nunca `destino.join(rel)`.
+- Probar apps gráficas desde SSH: `.app` → `open -n --env VAR=… ruta/iCopy.app`; binario suelto → un
+  LaunchAgent temporal en `/tmp` con `EnvironmentVariables`, `launchctl bootstrap gui/$(id -u) <plist>`
+  y `launchctl bootout` al terminar. Siempre con `ICOPIA_DIR` de prueba y el puente falso.
+- Firma: equipo Apple **YYNWA2QYGF**. El certificado Developer ID, su clave, el `.p12` y la clave `.p8`
+  de notarización están en el Mac en `~/icopia-firma/` (no copiarlos a ningún otro sitio). Para firmar
+  en local: `ICOPY_MAC_P12=… ICOPY_MAC_P12_PASS=… ./empaquetar-mac.sh --firmar`.
+  **Nunca** toques la lista de llaveros del usuario a mano (`security list-keychains -s`); el script la
+  restaura sola.
+- Actualizaciones en Mac: `actualizar::macos` sustituye el bundle tras comprobar la firma v2, la firma de
+  Apple y el Team ID; deja la anterior en `.iCopy-vieja.app` (se borra al arrancar) y se relanza.
+
+## Ramas y etiquetas
+
+Ninguna rama se llama como una etiqueta (`vX.Y.Z`): Git no sabría qué empujar.
 
 ## Commits
 

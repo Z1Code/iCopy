@@ -5,6 +5,12 @@ numeración: [SemVer](https://semver.org/lang/es/).
 
 ## [Sin publicar]
 
+### Añadido
+- **iCopy para Mac (beta, Apple Silicon):** app de la barra de menús con la misma copia verificada que
+  en Windows, inicio de sesión propio, avisos, «Abrir al iniciar sesión» y actualizaciones automáticas.
+  Se instala con un `.dmg` firmado y notarizado por Apple. «Liberar espacio en iCloud» llega a Mac en
+  la próxima versión.
+
 ### Seguridad
 - Las actualizaciones llevan una firma v2 que cubre también el nombre del paquete (versión y sistema):
   ya no se puede servir un instalador antiguo auténtico como si fuera nuevo. Se rechazan paquetes de

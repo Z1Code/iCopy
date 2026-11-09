@@ -147,8 +147,10 @@ con Google». Google es la opción con menos trámite:
 
 ## Orden de trabajo
 
-1. v0.2.0: arreglo de sesión (hecho) + versionado + CI + instalador Windows + actualizaciones.
-2. v0.3.0: interfaz webview en Windows (paridad con la actual, revisada con capturas).
-3. v0.4.0: macOS (plataforma, bundle, firma, notarización, dmg).
+1. v0.2.0 (publicada): arreglo de sesión + versionado + CI + instalador Windows + actualizaciones.
+2. v0.3.0: **macOS beta** (plataforma, barra de menús, login en webview, bundle, firma, notarización,
+   dmg, actualizador) + endurecimiento del actualizador. Se adelantó a la interfaz webview: ver la
+   decisión en `docs/superpowers/plans/2026-11-08-v0.3.0-macos.md`.
+3. v0.4.0: interfaz webview completa (panel y asistente) en los dos sistemas; «Liberar espacio» en macOS.
 4. v0.5.0: Google Drive.
 5. Mejoras de la sección 6 entre medias, según prioridad.
