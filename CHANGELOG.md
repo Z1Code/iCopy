@@ -5,7 +5,7 @@ numeración: [SemVer](https://semver.org/lang/es/).
 
 ## [Sin publicar]
 
-## [0.3.0-rc.1] - 2026-11-10
+## [0.3.0] - 2026-11-10
 
 ### Añadido
 - **iCopy para Mac (beta, Apple Silicon):** app de la barra de menús con la misma copia verificada que
@@ -40,6 +40,6 @@ numeración: [SemVer](https://semver.org/lang/es/).
 
 Primera versión: copia verificada de iCloud Fotos, panel en la bandeja y asistente para liberar espacio.
 
-[Sin publicar]: https://github.com/Z1Code/iCopy/compare/v0.3.0-rc.1...HEAD
-[0.3.0-rc.1]: https://github.com/Z1Code/iCopy/compare/v0.2.0...v0.3.0-rc.1
+[Sin publicar]: https://github.com/Z1Code/iCopy/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/Z1Code/iCopy/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Z1Code/iCopy/releases/tag/v0.2.0
